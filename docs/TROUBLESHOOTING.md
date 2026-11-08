@@ -66,6 +66,26 @@ opencloddie attach <name>
 Verify with `tmux list-clients -F '#{client_session} #{client_width}x#{client_height}'`
 while resizing the browser.  On current clients the client width/height changes.
 
+**Selecting text says “N chars copied to the tmux buffer” but web copy is empty**
+tmux mouse mode is doing the selection, so the text is in tmux's paste buffer,
+not xterm's.  Use the session's **tmux** button (always copies the newest
+buffer) or **right-click** (shows it in a selectable/downloadable dialog).  The
+normal **Copy** button also asks the agent for the buffer, but only uses it when
+it is less than 120 seconds old; otherwise it copies the visible screen.  This
+requires the current client/agent on that host:
+
+```bash
+curl -fsSL https://oc.dustify.com/install/opencloddie -o ~/.local/bin/opencloddie
+chmod +x ~/.local/bin/opencloddie
+ps -eo pid,args | grep '[o]pencloddie __agent'
+kill <pid-for-that-session>
+opencloddie attach <name>
+```
+
+If the browser blocks clipboard writes, the copy toast offers **Show text**;
+the dialog's textarea is pre-selected for a native Ctrl+C and has a **Download**
+button.
+
 **Web UI logs out / 302 loops**
 Authelia session expired; log in again.  Long-lived terminal WebSockets stay
 open until closed, but new API calls redirect.

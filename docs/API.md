@@ -169,6 +169,8 @@ Then the framed protocol (text JSON frames; `data` is base64):
 | agent→server | `{"t":"out","ch":1,"data":"..."}` | PTY output |
 | server→agent | `{"t":"in","ch":1,"data":"..."}` | keystrokes |
 | server→agent | `{"t":"resize","ch":1,"cols":120,"rows":40}` | resize |
+| server→agent | `{"t":"get_buffer","ch":1}` | read this host's newest tmux paste buffer |
+| agent→server | `{"t":"buffer","ch":1,"data":"...","created":1794110356,"size":33,"name":"buffer30"}` | tmux buffer contents (base64); `error` instead when empty |
 | server→agent | `{"t":"close","ch":1}` | close this viewer's PTY |
 | agent→server | `{"t":"exit","ch":1,"code":0}` | PTY ended |
 | agent→server | `{"t":"error","ch":1,"message":"..."}` | channel error |
@@ -192,8 +194,16 @@ Frames:
 | --- | --- | --- |
 | server→browser | binary | raw PTY bytes (UTF-8 terminal stream) |
 | server→browser | text | `{"t":"hello","session":{...}}`, `{"t":"error","message":"..."}`, `{"t":"exit","code":0}` |
+| server→browser | text | `{"t":"tmux_buffer","data":"<base64>","created":1794110356,"size":33,"name":"buffer30"}` or `{"t":"tmux_buffer","error":"..."}` |
 | browser→server | binary | raw input bytes |
-| browser→server | text | `{"t":"resize","cols":120,"rows":40}`, `{"t":"ping"}` |
+| browser→server | text | `{"t":"resize","cols":120,"rows":40}`, `{"t":"ping"}`, `{"t":"get_tmux_buffer"}` |
+
+`get_tmux_buffer` is proxied to the agent, which runs
+`tmux show-buffer` on the session host.  This is how the UI copies text the
+user selected with tmux mouse mode (that selection lives in tmux's buffer, not
+xterm's).  `created` is the buffer's Unix timestamp; the UI only uses a buffer
+automatically for Copy when it is under 120 seconds old and falls back to the
+visible screen otherwise.  The dedicated **tmux** action always uses it.
 
 If the session is offline, the server accepts the handshake, sends an error
 text frame, and closes with 1011.  The browser UI shows an offline overlay and

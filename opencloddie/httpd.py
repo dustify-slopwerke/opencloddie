@@ -689,6 +689,11 @@ class Handler(BaseHTTPRequestHandler):
                         ws.send_binary(value)
                     elif kind == "error":
                         ws.send_text(json.dumps({"t": "error", "message": value}))
+                    elif kind == "buffer":
+                        payload = {"t": "tmux_buffer"}
+                        if isinstance(value, dict):
+                            payload.update(value)
+                        ws.send_text(json.dumps(payload))
                     elif kind == "exit":
                         ws.send_text(json.dumps({"t": "exit", "code": value}))
                         break
@@ -716,6 +721,8 @@ class Handler(BaseHTTPRequestHandler):
                     kind = message.get("t")
                     if kind == "resize":
                         channel.resize(message.get("cols"), message.get("rows"))
+                    elif kind == "get_tmux_buffer":
+                        channel.request_buffer()
                     elif kind == "ping":
                         ws.send_text(json.dumps({"t": "pong"}))
         except (WSClosed, OSError, WebSocketError):

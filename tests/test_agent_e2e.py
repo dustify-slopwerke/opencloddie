@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -155,6 +156,24 @@ class AgentEndToEndTest(unittest.TestCase):
                     if message.get("t") == "error":
                         self.fail(f"terminal error: {message}")
             self.assertIn(marker.encode(), output, output[-800:])
+
+            # tmux mouse selections land in tmux's paste buffer, not xterm's.
+            buffer_text = "BUFFER_MARKER_" + uuid.uuid4().hex[:8]
+            subprocess.run(["tmux", "set-buffer", "--", buffer_text], check=True)
+            ws.send_text(json.dumps({"t": "get_tmux_buffer"}))
+            got = None
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                opcode, payload = ws.recv()
+                if opcode == OP_TEXT:
+                    message = json.loads(payload)
+                    if message.get("t") == "tmux_buffer":
+                        got = message
+                        break
+            self.assertIsNotNone(got, "no tmux_buffer response")
+            self.assertFalse(got.get("error"), got)
+            self.assertEqual(base64.b64decode(got.get("data", "")).decode(), buffer_text)
+            self.assertGreater(int(got.get("created", 0)), 0)
         finally:
             ws.close()
 

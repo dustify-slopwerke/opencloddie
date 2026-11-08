@@ -15,6 +15,8 @@ const state = {
   booted: false,
 };
 
+const TMUX_BUFFER_FRESH_SECONDS = 120;
+
 const TERM_THEME = {
   background: '#07090c',
   foreground: '#d7dfe9',
@@ -150,6 +152,10 @@ function copyFromTerminal(entry) {
     copyText(selection, { manualAction: true });
     return;
   }
+  requestTmuxBuffer(entry, 'auto');
+}
+
+function copyScreen(entry) {
   const screen = getScreenText(entry);
   if (!screen.trim()) {
     toast('Terminal is empty', 'warn');
@@ -157,8 +163,83 @@ function copyFromTerminal(entry) {
   }
   copyText(screen, {
     manualAction: true,
-    message: 'No selection — copied the visible screen',
+    message: 'No fresh tmux selection — copied the visible screen',
   });
+}
+
+function showScreenFallback(entry) {
+  const screen = getScreenText(entry);
+  if (screen.trim()) showCopyFallback(screen, 'Copy visible screen');
+  else toast('Terminal is empty', 'warn');
+}
+
+function requestTmuxBuffer(entry, mode) {
+  if (!entry || entry.disposed) return;
+  if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) {
+    if (mode === 'auto') copyScreen(entry);
+    else if (mode === 'modal') showScreenFallback(entry);
+    else toast('Session is not connected', 'warn');
+    return;
+  }
+  if (entry.pendingBuffer && mode === 'auto') return;
+  if (entry.bufferTimer) clearTimeout(entry.bufferTimer);
+  entry.pendingBuffer = { mode };
+  entry.ws.send(JSON.stringify({ t: 'get_tmux_buffer' }));
+  entry.bufferTimer = setTimeout(() => {
+    const pending = entry.pendingBuffer;
+    entry.pendingBuffer = null;
+    entry.bufferTimer = null;
+    if (!pending) return;
+    if (pending.mode === 'auto') copyScreen(entry);
+    else if (pending.mode === 'modal') showScreenFallback(entry);
+    else toast('Timed out reading the tmux buffer', 'error');
+  }, 4000);
+}
+
+function handleTmuxBuffer(entry, message) {
+  const pending = entry.pendingBuffer;
+  entry.pendingBuffer = null;
+  if (entry.bufferTimer) {
+    clearTimeout(entry.bufferTimer);
+    entry.bufferTimer = null;
+  }
+  if (!pending) return;
+  const mode = pending.mode;
+  if (message.error) {
+    if (mode === 'auto') copyScreen(entry);
+    else if (mode === 'modal') showScreenFallback(entry);
+    else toast(message.error || 'tmux buffer is empty', 'warn');
+    return;
+  }
+  let text = '';
+  try {
+    const raw = atob(message.data || '');
+    const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+    text = new TextDecoder().decode(bytes);
+  } catch (_) {
+    text = '';
+  }
+  if (!text) {
+    if (mode === 'auto') copyScreen(entry);
+    else if (mode === 'modal') showScreenFallback(entry);
+    else toast('tmux buffer is empty', 'warn');
+    return;
+  }
+  if (mode === 'modal') {
+    showCopyFallback(text, 'Copy tmux buffer');
+    return;
+  }
+  if (mode === 'auto') {
+    const created = Number(message.created || 0);
+    const fresh = created > 0 && (Date.now() / 1000 - created) <= TMUX_BUFFER_FRESH_SECONDS;
+    if (!fresh) {
+      copyScreen(entry);
+      return;
+    }
+    copyText(text, { manualAction: true, message: 'Copied recent tmux selection' });
+    return;
+  }
+  copyText(text, { manualAction: true, message: 'Copied tmux buffer' });
 }
 
 function showCopyFallback(text, title = 'Copy manually') {
@@ -429,7 +510,8 @@ function renderTopbar() {
     const active = activeSession();
     if (active) {
       root.append(
-        h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selection or visible screen', onclick: copySelection }),
+        h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selection, recent tmux buffer, or visible screen', onclick: copySelection }),
+        h('button', { class: 'btn btn-sm', text: 'tmux', title: 'Copy the tmux selection buffer (any age)', onclick: () => requestTmuxBuffer(state.terminals.get(state.activeId), 'manual') }),
         h('button', { class: 'btn btn-ghost btn-sm', text: 'Copy attach', onclick: () => copyText(`opencloddie attach ${quoteArg(active.name)}`) }),
         h('button', { class: 'btn btn-danger btn-sm', text: 'Kill session', onclick: () => killSession(active) }),
       );
@@ -585,6 +667,8 @@ function ensureTerminal(session) {
     generation: 0,
     observer: null,
     selection: '',
+    pendingBuffer: null,
+    bufferTimer: null,
   };
   state.terminals.set(session.id, entry);
   setupTerminalClipboard(entry);
@@ -659,9 +743,7 @@ function setupTerminalClipboard(entry) {
       showCopyFallback(selection, 'Copy terminal text');
       return;
     }
-    const screen = getScreenText(entry);
-    if (screen.trim()) showCopyFallback(screen, 'Copy visible screen');
-    else toast('Terminal is empty', 'warn');
+    requestTmuxBuffer(entry, 'modal');
   });
 }
 
@@ -716,6 +798,8 @@ function connectTerminal(entry, session) {
       } else if (message.t === 'error') {
         toast(message.message || 'terminal error', 'error');
         updateStatusline(entry, message.message);
+      } else if (message.t === 'tmux_buffer') {
+        handleTmuxBuffer(entry, message);
       } else if (message.t === 'exit') {
         updateStatusline(entry, 'session ended');
         entry.term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n');
@@ -753,6 +837,8 @@ function scheduleReconnect(entry) {
 function disconnectTerminal(entry) {
   entry.generation += 1;
   if (entry.retryTimer) { clearTimeout(entry.retryTimer); entry.retryTimer = null; }
+  if (entry.bufferTimer) { clearTimeout(entry.bufferTimer); entry.bufferTimer = null; }
+  entry.pendingBuffer = null;
   if (entry.ws) {
     try { entry.ws.close(); } catch (_) { /* ignore */ }
     entry.ws = null;

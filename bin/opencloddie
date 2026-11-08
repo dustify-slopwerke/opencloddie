@@ -1200,6 +1200,8 @@ class Agent:
                     channel = self.channels.get(int(message.get("ch", -1)))
                     if channel:
                         channel[0].resize(int(message.get("cols", 80)), int(message.get("rows", 24)))
+                elif kind == "get_buffer":
+                    self._send_buffer(int(message.get("ch", -1)))
                 elif kind == "close":
                     self._close_channel(int(message.get("ch", -1)))
                 elif kind == "kill":
@@ -1277,6 +1279,60 @@ class Agent:
         for proc, stop in channels:
             stop.set()
             proc.close()
+
+    def _send_buffer(self, ch: int) -> None:
+        """Return the newest tmux paste buffer for this host.
+
+        tmux mouse selections go into tmux's buffer, not xterm's, so this is
+        how the web UI can copy what the user selected in the terminal.
+        """
+        if ch < 0:
+            return
+        name = ""
+        created = 0
+        size = 0
+        try:
+            meta = subprocess.run(
+                ["tmux", "list-buffers", "-F", "#{buffer_name}\t#{buffer_created}\t#{buffer_size}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in meta.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    c = int(float(parts[1] or 0))
+                    s = int(parts[2] or 0)
+                except ValueError:
+                    c, s = 0, 0
+                if not name or (c and c > created):
+                    name, created, size = parts[0], c, s
+        except Exception as exc:  # noqa: BLE001
+            self._send({"t": "buffer", "ch": ch, "error": f"{type(exc).__name__}: {exc}"})
+            return
+        try:
+            cmd = ["tmux", "show-buffer"] + (["-b", name] if name else [])
+            show = subprocess.run(cmd, capture_output=True, timeout=5)
+        except Exception as exc:  # noqa: BLE001
+            self._send({"t": "buffer", "ch": ch, "error": f"{type(exc).__name__}: {exc}"})
+            return
+        if show.returncode != 0:
+            err = (show.stderr or b"").decode("utf-8", "replace").strip() or "tmux buffer is empty"
+            self._send({"t": "buffer", "ch": ch, "error": err[:300]})
+            return
+        data = show.stdout[: 1024 * 1024]
+        self._send(
+            {
+                "t": "buffer",
+                "ch": ch,
+                "data": base64.b64encode(data).decode("ascii"),
+                "created": created,
+                "size": len(show.stdout),
+                "name": name,
+            }
+        )
 
     def _send(self, obj: dict) -> None:
         with self.ws_lock:

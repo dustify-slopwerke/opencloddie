@@ -54,6 +54,9 @@ class Channel:
     def resize(self, cols: int, rows: int) -> None:
         self.agent.send_json({"t": "resize", "ch": self.id, "cols": int(cols), "rows": int(rows)})
 
+    def request_buffer(self) -> None:
+        self.agent.send_json({"t": "get_buffer", "ch": self.id})
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -131,6 +134,20 @@ class AgentConnection:
             channel = self.channels.get(_as_int(message.get("ch")))
             if channel:
                 channel.put("error", str(message.get("message", "terminal error")))
+            return
+        if kind == "buffer":
+            channel = self.channels.get(_as_int(message.get("ch")))
+            if channel:
+                channel.put(
+                    "buffer",
+                    {
+                        "data": message.get("data", ""),
+                        "created": message.get("created", 0),
+                        "size": message.get("size", 0),
+                        "name": message.get("name", ""),
+                        "error": message.get("error", ""),
+                    },
+                )
             return
         if kind == "meta":
             self._update_meta(message)
