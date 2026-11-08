@@ -81,15 +81,18 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         text = body.decode()
-        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert"):
+        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert", 'id="layout-toggle"'):
             self.assertIn(needle, text)
         status, _, js = self.server.request(self.server.web_port, "GET", "/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"function openDrawer", js)
         self.assertIn(b"function closeDrawer", js)
+        self.assertIn(b"function computeGrid", js)
+        self.assertIn(b"function layoutTiles", js)
         status, _, css = self.server.request(self.server.web_port, "GET", "/style.css")
         self.assertEqual(status, 200)
         self.assertIn(b".rail.is-open", css)
+        self.assertIn(b".terminals.tiled", css)
 
     # ------------------------------------------------------------ opencode
     def test_opencode_key_lifecycle(self):

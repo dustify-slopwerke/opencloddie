@@ -146,6 +146,20 @@ pre {
 .topbar-title { display: flex; align-items: baseline; gap: 12px; min-width: 0; flex: 1; }
 .topbar h1 { font-size: 16px; font-weight: 620; margin: 0; letter-spacing: -.2px; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.layout-toggle {
+  display: flex; gap: 2px; padding: 2px; flex: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2);
+}
+.layout-btn {
+  width: 30px; height: 28px; display: grid; place-items: center;
+  border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.layout-btn svg {
+  width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linejoin: round;
+}
+.layout-btn:hover { color: var(--text); background: var(--panel-3); }
+.layout-btn.is-active { color: var(--accent); background: var(--panel-3); }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .content { padding: 24px 26px 40px; overflow: auto; width: min(1100px, 100%); }
 .content.two-col { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .9fr); gap: 22px; align-items: start; }
@@ -237,10 +251,63 @@ pre {
 
 .terminal-area { position: relative; flex: 1; min-height: 0; background: #07090c; }
 .terminals { position: absolute; inset: 0; }
-.term-wrap { position: absolute; inset: 0; padding: 10px 12px 12px; }
+.term-wrap { position: absolute; inset: 0; padding: 10px 12px 12px; display: flex; flex-direction: column; }
+.tile-term { flex: 1; min-height: 0; position: relative; }
+.tile-head { display: none; }
 .term-wrap .xterm { height: 100%; }
 .term-wrap .xterm-viewport { scrollbar-width: thin; }
 .term-wrap.hidden { display: none; }
+
+/* Tiled session layout */
+.terminals.tiled {
+  display: grid;
+  grid-template-columns: repeat(var(--tile-cols, 1), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--tile-rows, 1), minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  background: #07090c;
+}
+.terminals.tiled .term-wrap {
+  position: relative; inset: auto; padding: 0; overflow: hidden;
+  border: 1px solid var(--border-soft); border-radius: 8px;
+  background: #07090c; display: flex; flex-direction: column;
+}
+.terminals.tiled .term-wrap.is-active {
+  border-color: rgba(126,231,135,.42);
+  box-shadow: 0 0 0 1px rgba(126,231,135,.12);
+}
+.terminals.tiled .tile-head {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  height: 28px; padding: 0 7px 0 9px;
+  background: var(--panel-2); border-bottom: 1px solid var(--border-soft);
+  cursor: default; user-select: none;
+}
+.terminals.tiled .tile-name {
+  font-size: 12px; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.terminals.tiled .tile-model {
+  margin-left: auto; color: var(--dim); font: 10.5px/1 var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 42%;
+}
+.tile-focus {
+  flex: none; width: 22px; height: 22px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; display: grid; place-items: center;
+}
+.tile-focus:hover { color: var(--text); background: var(--panel-3); }
+.terminals.tiled .tile-term { flex: 1; min-height: 0; padding: 4px 6px 6px; }
+.terminals.tiled .term-wrap.is-offline .tile-term { opacity: .25; }
+.tile-offline {
+  position: absolute; left: 0; right: 0; bottom: 0; top: 28px;
+  display: grid; place-items: center; padding: 12px; text-align: center;
+  background: rgba(7,9,12,.72); color: var(--muted); font-size: 12px;
+  z-index: 2; pointer-events: none;
+}
+.terminals.single .tile-head,
+.terminals.single .tile-offline { display: none; }
+.terminals.single .tile-term { height: 100%; }
+.terminals.single .term-wrap { position: absolute; inset: 0; padding: 10px 12px 12px; }
 
 .empty, .session-overlay { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(7,9,12,.72); }
 .empty-card, .overlay-card {
@@ -360,4 +427,7 @@ pre {
   .tabs { padding: 6px 8px; }
   .empty-card, .overlay-card { padding: 20px; }
   .steps li { grid-template-columns: 64px minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .layout-toggle { display: none; }
 }

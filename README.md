@@ -17,8 +17,8 @@ opencloddie is three things in one small, dependency-free service:
    local tmux session and ships its terminal to the server, one channel per
    viewer.  Detach with `Ctrl-b d`; the session keeps running and stays in the
    web UI.
-3. **A tabbed web app** (behind nginx + Authelia) to switch between all your
-   connected sessions, generate API keys, choose models, and manage your
+3. **A tabbed/tiled web app** (behind nginx + Authelia) to switch between all
+   your connected sessions, generate API keys, choose models, and manage your
    OpenCode key.
 
 No peak/off-peak heuristics: you pick the model, per API key, in the UI.

@@ -10,6 +10,7 @@ const state = {
   system: null,
   activeId: null,
   view: 'sessions',
+  layout: 'single',
   terminals: new Map(),
   poll: null,
   booted: false,
@@ -374,6 +375,10 @@ async function boot() {
   renderIdentity();
   renderModelNotes();
   renderInstall();
+  state.layout = safeStorageGet('opencloddie.layout') === 'tile' ? 'tile' : 'single';
+  // Phones keep a single terminal; the toggle is hidden at this width.
+  if (window.matchMedia('(max-width: 520px)').matches) state.layout = 'single';
+  applyLayoutChrome();
   await loadSessions();
   await loadSystem();
   setView('sessions');
@@ -383,8 +388,12 @@ async function boot() {
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Insert copy · Shift+Insert paste';
   setTimeout(() => {
-    const entry = state.terminals.get(state.activeId);
-    if (entry) fitTerminal(entry);
+    if (state.layout === 'tile') {
+      layoutTiles();
+    } else {
+      const entry = state.terminals.get(state.activeId);
+      if (entry) fitTerminal(entry);
+    }
   }, 60);
   state.poll = setInterval(() => {
     if (!document.hidden) loadSessions({ quiet: true });
@@ -466,6 +475,7 @@ const VIEWS = {
 function setView(view) {
   state.view = view;
   $$('.nav-item').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
+  $('#layout-toggle').hidden = view !== 'sessions';
   for (const name of Object.keys(VIEWS)) {
     const section = $(`#view-${name}`);
     if (section) section.hidden = name !== view;
@@ -480,8 +490,12 @@ function setView(view) {
   }
   if (view === 'sessions') {
     loadSessions({ quiet: true });
-    const entry = state.terminals.get(state.activeId);
-    if (entry) setTimeout(() => { fitTerminal(entry); entry.term.focus(); }, 30);
+    if (state.layout === 'tile') {
+      requestAnimationFrame(() => layoutTiles());
+    } else {
+      const entry = state.terminals.get(state.activeId);
+      if (entry) setTimeout(() => { fitTerminal(entry); entry.term.focus(); }, 30);
+    }
   }
 }
 
@@ -507,6 +521,133 @@ function renderTopbar() {
   }
 }
 
+/* ---------------------------------------------------------------- layout */
+function applyLayoutChrome() {
+  const terminals = $('#terminals');
+  terminals.classList.toggle('tiled', state.layout === 'tile');
+  terminals.classList.toggle('single', state.layout === 'single');
+  $('#tabs').hidden = state.layout === 'tile';
+  renderLayoutToggle();
+  updateTilesActive();
+}
+
+function renderLayoutToggle() {
+  const single = $('#layout-single');
+  const tile = $('#layout-tile');
+  if (!single || !tile) return;
+  single.classList.toggle('is-active', state.layout === 'single');
+  tile.classList.toggle('is-active', state.layout === 'tile');
+  single.setAttribute('aria-pressed', String(state.layout === 'single'));
+  tile.setAttribute('aria-pressed', String(state.layout === 'tile'));
+}
+
+function setLayout(mode, { persist = true } = {}) {
+  if (mode !== 'single' && mode !== 'tile') return;
+  state.layout = mode;
+  if (persist) safeStorageSet('opencloddie.layout', mode);
+  applyLayoutChrome();
+  if (!state.activeId && state.sessions.length) {
+    const preferred = state.sessions.find((s) => s.online) || state.sessions[0];
+    state.activeId = preferred.id;
+  }
+  renderTopbar();
+  if (mode === 'tile') {
+    layoutTiles();
+    return;
+  }
+  if (state.activeId) {
+    activate(state.activeId, { quiet: true });
+  } else {
+    $('#empty').hidden = false;
+    $('#session-overlay').hidden = true;
+    $('#status-active').textContent = 'No session selected';
+  }
+}
+
+// Choose the column/row split that gives the most usable terminal area: prefer
+// cells with a ~1.55 aspect ratio, penalize empty cells, and fall back to a
+// square-ish grid when the container cannot satisfy the minimum size.
+function computeGrid(count, width, height) {
+  if (count <= 1) return { cols: 1, rows: 1 };
+  const gap = 6;
+  const pad = 6;
+  const header = 28;
+  const usableW = Math.max(1, width - pad * 2);
+  const usableH = Math.max(1, height - pad * 2);
+  let best = null;
+  for (let cols = 1; cols <= count; cols += 1) {
+    const rows = Math.ceil(count / cols);
+    const cellW = (usableW - gap * (cols - 1)) / cols;
+    const cellH = (usableH - gap * (rows - 1)) / rows;
+    const termH = cellH - header;
+    if (cellW < 200 || termH < 100) continue;
+    const empty = cols * rows - count;
+    const aspect = cellW / termH;
+    const aspectPenalty = Math.abs(Math.log(aspect / 1.55));
+    const score = Math.log(cellW * termH) - empty * 0.45 - aspectPenalty * 0.8;
+    if (!best || score > best.score) best = { cols, rows, score };
+  }
+  if (!best) {
+    const cols = Math.max(1, Math.min(count, Math.round(Math.sqrt(count * (usableW / usableH)))));
+    best = { cols, rows: Math.ceil(count / cols) };
+  }
+  return best;
+}
+
+function layoutTiles() {
+  if (state.layout !== 'tile') return;
+  const root = $('#terminals');
+  const sessions = state.sessions;
+  if (!sessions.length) {
+    $('#empty').hidden = false;
+    $('#session-overlay').hidden = true;
+    $('#status-active').textContent = 'No session selected';
+    return;
+  }
+  $('#empty').hidden = true;
+  $('#session-overlay').hidden = true;
+  const grid = computeGrid(sessions.length, root.clientWidth, root.clientHeight);
+  root.style.setProperty('--tile-cols', String(grid.cols));
+  root.style.setProperty('--tile-rows', String(grid.rows));
+  for (const session of sessions) {
+    const entry = ensureTerminal(session);
+    entry.el.classList.remove('hidden');
+    updateTileHeader(entry, session);
+  }
+  updateTilesActive();
+  const active = activeSession();
+  $('#status-active').textContent = active
+    ? `${active.name} · ${active.hostname || 'host'} · ${active.cwd || '—'} · ${active.model || ''}`
+    : 'No session selected';
+  requestAnimationFrame(() => {
+    for (const session of sessions) {
+      const entry = state.terminals.get(session.id);
+      if (entry) fitTerminal(entry);
+    }
+  });
+}
+
+function updateTilesActive() {
+  for (const [id, entry] of state.terminals) {
+    entry.el.classList.toggle('is-active', state.layout === 'tile' && id === state.activeId);
+  }
+}
+
+function updateTileHeader(entry, session) {
+  if (!entry.headName) return;
+  entry.headDot.className = session.online ? 'dot online' : 'dot';
+  entry.headName.textContent = session.name;
+  entry.headModel.textContent = session.model || '';
+  entry.el.title = `${session.name}\n${session.hostname || ''} · ${session.cwd || ''}\n${session.model || ''}`;
+  entry.offlineEl.hidden = Boolean(session.online);
+  if (!session.online) {
+    entry.offlineEl.textContent = session.last_seen
+      ? `Offline · last seen ${session.last_seen}`
+      : 'Offline';
+  }
+  entry.el.classList.toggle('is-offline', !session.online);
+}
+
 /* ---------------------------------------------------------------- sessions */
 async function loadSessions({ quiet = false } = {}) {
   let data;
@@ -524,6 +665,7 @@ async function loadSessions({ quiet = false } = {}) {
     if (entry) {
       const wasOnline = entry.session && entry.session.online;
       entry.session = session;
+      updateTileHeader(entry, session);
       if (wasOnline && !session.online) disconnectTerminal(entry);
       if (!wasOnline && session.online) connectTerminal(entry, session);
     }
@@ -541,8 +683,17 @@ async function loadSessions({ quiet = false } = {}) {
   }
   if (!state.sessions.length) state.activeId = null;
   renderTabs();
-  if (state.activeId) activate(state.activeId, { quiet: true });
-  else {
+  if (state.layout === 'tile') {
+    if (state.sessions.length) {
+      layoutTiles();
+    } else {
+      $('#empty').hidden = false;
+      $('#session-overlay').hidden = true;
+      $('#status-active').textContent = 'No session selected';
+    }
+  } else if (state.activeId) {
+    activate(state.activeId, { quiet: true });
+  } else {
     $('#empty').hidden = false;
     $('#session-overlay').hidden = true;
     $('#status-active').textContent = 'No session selected';
@@ -593,6 +744,24 @@ function activate(id, { quiet = false } = {}) {
   updateSubtitle();
   if (!quiet || changed) renderTopbar();
 
+  if (state.layout === 'tile') {
+    $('#empty').hidden = true;
+    $('#session-overlay').hidden = true;
+    const entry = ensureTerminal(session);
+    entry.el.classList.remove('hidden');
+    updateTileHeader(entry, session);
+    if (!entry.ws && !entry.retryTimer && session.online) connectTerminal(entry, session);
+    updateTilesActive();
+    requestAnimationFrame(() => {
+      fitTerminal(entry);
+      if (session.online) entry.term.focus();
+    });
+    $('#status-active').textContent = session.online
+      ? `${session.name} · ${session.hostname || 'host'} · ${session.cwd || '—'} · ${session.model || ''}`
+      : `${session.name} · offline · last seen ${session.last_seen || 'never'}`;
+    return;
+  }
+
   $('#empty').hidden = true;
   for (const [otherId, entry] of state.terminals) {
     entry.el.classList.toggle('hidden', otherId !== id);
@@ -622,6 +791,24 @@ function ensureTerminal(session) {
     return entry;
   }
   const el = h('div', { class: 'term-wrap hidden' });
+  const headDot = h('span', { class: 'dot' });
+  const headName = h('span', { class: 'tile-name', text: session.name });
+  const headModel = h('span', { class: 'tile-model', text: session.model || '' });
+  const focusBtn = h('button', {
+    class: 'tile-focus',
+    type: 'button',
+    title: 'Focus this session',
+    'aria-label': 'Focus this session',
+    text: '⤢',
+  });
+  const head = h('div', { class: 'tile-head' }, headDot, headName, headModel, focusBtn);
+  const termEl = h('div', { class: 'tile-term' });
+  const offlineEl = h('div', {
+    class: 'tile-offline',
+    hidden: Boolean(session.online),
+    text: 'Offline',
+  });
+  el.append(head, termEl, offlineEl);
   $('#terminals').append(el);
   const term = new Terminal({
     cursorBlink: true,
@@ -634,11 +821,16 @@ function ensureTerminal(session) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  term.open(el);
+  term.open(termEl);
   entry = {
     id: session.id,
     session,
     el,
+    headDot,
+    headName,
+    headModel,
+    termEl,
+    offlineEl,
     term,
     fit,
     ws: null,
@@ -655,6 +847,26 @@ function ensureTerminal(session) {
   state.terminals.set(session.id, entry);
   setupTerminalClipboard(entry);
 
+  head.addEventListener('click', (event) => {
+    if (event.target.closest('.tile-focus')) return;
+    if (state.layout === 'tile') activate(session.id, { quiet: true });
+  });
+  head.addEventListener('dblclick', (event) => {
+    if (event.target.closest('.tile-focus')) return;
+    setLayout('single');
+    activate(session.id);
+  });
+  focusBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setLayout('single');
+    activate(session.id);
+  });
+  el.addEventListener('mousedown', (event) => {
+    if (state.layout !== 'tile') return;
+    if (event.target.closest('.tile-focus')) return;
+    if (state.activeId !== session.id) activate(session.id, { quiet: true });
+  });
+
   term.onData((data) => {
     entry.selection = '';
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
@@ -667,7 +879,8 @@ function ensureTerminal(session) {
   entry.observer = new ResizeObserver(() => {
     if (!entry.el.classList.contains('hidden')) fitTerminal(entry);
   });
-  entry.observer.observe(el);
+  entry.observer.observe(termEl);
+  updateTileHeader(entry, session);
   connectTerminal(entry, session);
   return entry;
 }
@@ -1154,6 +1367,8 @@ function bind() {
   $('#menu-btn').addEventListener('click', toggleDrawer);
   $('#drawer-close').addEventListener('click', () => closeDrawer({ restoreFocus: true }));
   $('#drawer-backdrop').addEventListener('click', () => closeDrawer({ restoreFocus: true }));
+  $('#layout-single').addEventListener('click', () => setLayout('single'));
+  $('#layout-tile').addEventListener('click', () => setLayout('tile'));
   $('#modal-x').addEventListener('click', closeModal);
   $('#modal-root').addEventListener('click', (event) => {
     if (event.target.dataset.close) closeModal();
@@ -1202,7 +1417,20 @@ function bind() {
       }
     });
   });
+  let tileResizeTimer = null;
+  new ResizeObserver(() => {
+    if (state.layout !== 'tile' || !state.booted) return;
+    clearTimeout(tileResizeTimer);
+    tileResizeTimer = setTimeout(() => layoutTiles(), 80);
+  }).observe($('#terminals'));
   window.addEventListener('resize', () => {
+    if (window.matchMedia('(max-width: 520px)').matches && state.layout === 'tile') {
+      setLayout('single', { persist: false });
+    }
+    if (state.layout === 'tile') {
+      layoutTiles();
+      return;
+    }
     const entry = state.terminals.get(state.activeId);
     if (entry) fitTerminal(entry);
   });
