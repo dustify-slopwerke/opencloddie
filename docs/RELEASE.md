@@ -64,7 +64,7 @@ git push origin v0.1.0
 
 | Artifact | Location |
 | --- | --- |
-| Container image | `ghcr.io/dustify-slopwerke/opencloddie:v0.1.0`, `:0.1`, `:latest` |
+| Container image | `ghcr.io/dustify-slopwerke/opencloddie:0.1.0`, `:0.1`, `:latest` |
 | Wheel | `opencloddie-0.1.0-py3-none-any.whl` on the release |
 | Source distribution | `opencloddie-0.1.0.tar.gz` on the release |
 | Source archives | GitHub's automatic `zip`/`tar.gz` |
@@ -76,11 +76,11 @@ settings in GitHub and set its visibility to public if the world should pull it.
 ## Install the release
 
 ```bash
-docker pull ghcr.io/dustify-slopwerke/opencloddie:v0.1.0
+docker pull ghcr.io/dustify-slopwerke/opencloddie:0.1.0
 docker run -d --name opencloddie \
   -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
   -v opencloddie-data:/data \
-  ghcr.io/dustify-slopwerke/opencloddie:v0.1.0
+  ghcr.io/dustify-slopwerke/opencloddie:0.1.0
 ```
 
 Or install the wheel attached to the release:
@@ -103,13 +103,13 @@ chmod +x ~/.local/bin/opencloddie
 
 ```bash
 # image tags and platforms
-docker buildx imagetools inspect ghcr.io/dustify-slopwerke/opencloddie:v0.1.0
+docker buildx imagetools inspect ghcr.io/dustify-slopwerke/opencloddie:0.1.0
 
 # provenance (GitHub CLI)
-gh attestation verify oci://ghcr.io/dustify-slopwerke/opencloddie:v0.1.0 --owner dustify-slopwerke
+gh attestation verify oci://ghcr.io/dustify-slopwerke/opencloddie:0.1.0 --owner dustify-slopwerke
 
 # image health
-docker run --rm --entrypoint opencloddie-server ghcr.io/dustify-slopwerke/opencloddie:v0.1.0 --version
+docker run --rm --entrypoint opencloddie-server ghcr.io/dustify-slopwerke/opencloddie:0.1.0 --version
 
 # release assets
 gh release view v0.1.0 --repo dustify-slopwerke/opencloddie
