@@ -95,7 +95,7 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function copyText(text, { manualAction = false } = {}) {
+async function copyText(text, { manualAction = false, message = 'Copied to clipboard' } = {}) {
   let ok = false;
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -119,7 +119,7 @@ async function copyText(text, { manualAction = false } = {}) {
   }
   if (ok) {
     toast(
-      'Copied to clipboard',
+      message,
       'info',
       manualAction ? { label: 'Show text', onClick: () => showCopyFallback(text) } : null,
     );
@@ -127,6 +127,38 @@ async function copyText(text, { manualAction = false } = {}) {
   }
   showCopyFallback(text);
   return false;
+}
+
+function getScreenText(entry) {
+  const term = entry.term;
+  const buffer = term.buffer.active;
+  const start = buffer.viewportY;
+  const end = Math.min(buffer.length, start + term.rows);
+  const lines = [];
+  for (let i = start; i < end; i += 1) {
+    const line = buffer.getLine(i);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines.join('\n');
+}
+
+function copyFromTerminal(entry) {
+  if (!entry) return;
+  const selection = entry.term.getSelection() || entry.selection || '';
+  if (selection) {
+    copyText(selection, { manualAction: true });
+    return;
+  }
+  const screen = getScreenText(entry);
+  if (!screen.trim()) {
+    toast('Terminal is empty', 'warn');
+    return;
+  }
+  copyText(screen, {
+    manualAction: true,
+    message: 'No selection — copied the visible screen',
+  });
 }
 
 function showCopyFallback(text, title = 'Copy manually') {
@@ -397,7 +429,7 @@ function renderTopbar() {
     const active = activeSession();
     if (active) {
       root.append(
-        h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selected terminal text', onclick: copySelection }),
+        h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selection or visible screen', onclick: copySelection }),
         h('button', { class: 'btn btn-ghost btn-sm', text: 'Copy attach', onclick: () => copyText(`opencloddie attach ${quoteArg(active.name)}`) }),
         h('button', { class: 'btn btn-danger btn-sm', text: 'Kill session', onclick: () => killSession(active) }),
       );
@@ -588,13 +620,7 @@ function sendControl(entry, message) {
 }
 
 function copySelection() {
-  const entry = state.terminals.get(state.activeId);
-  const selection = entry ? (entry.term.getSelection() || entry.selection || '') : '';
-  if (!selection) {
-    toast('Drag to select terminal text first, then Copy', 'warn');
-    return;
-  }
-  copyText(selection, { manualAction: true });
+  copyFromTerminal(state.terminals.get(state.activeId));
 }
 
 function setupTerminalClipboard(entry) {
@@ -608,11 +634,8 @@ function setupTerminalClipboard(entry) {
     if (event.type !== 'keydown') return true;
     const key = (event.key || '').toLowerCase();
     if (event.ctrlKey && !event.shiftKey && key === 'insert') {
-      const selection = currentSelection();
-      if (selection) {
-        event.preventDefault();
-        copyText(selection, { manualAction: true });
-      }
+      event.preventDefault();
+      copyFromTerminal(entry);
       return false;
     }
     if (event.shiftKey && !event.ctrlKey && !event.metaKey && key === 'insert') {
@@ -623,20 +646,22 @@ function setupTerminalClipboard(entry) {
     // macOS: Cmd+C is copy; Ctrl+C must remain SIGINT.  Ctrl+Shift+C is
     // reserved by Chrome/Edge for DevTools, so it cannot be used.
     if (event.metaKey && !event.shiftKey && key === 'c') {
-      const selection = currentSelection();
-      if (selection) {
-        event.preventDefault();
-        copyText(selection, { manualAction: true });
-        return false;
-      }
+      event.preventDefault();
+      copyFromTerminal(entry);
+      return false;
     }
     return true;
   });
   entry.el.addEventListener('contextmenu', (event) => {
     event.preventDefault();
     const selection = currentSelection();
-    if (selection) showCopyFallback(selection, 'Copy terminal text');
-    else toast('Drag to select terminal text first', 'warn');
+    if (selection) {
+      showCopyFallback(selection, 'Copy terminal text');
+      return;
+    }
+    const screen = getScreenText(entry);
+    if (screen.trim()) showCopyFallback(screen, 'Copy visible screen');
+    else toast('Terminal is empty', 'warn');
   });
 }
 
