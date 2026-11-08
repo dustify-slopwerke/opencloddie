@@ -670,6 +670,7 @@ class Handler(BaseHTTPRequestHandler):
                         "t": "hello",
                         "session": self._public_session(self.app.db.get_session(session_id) or session),
                         "model": session.get("model"),
+                        "agent_features": dict(agent.features),
                     }
                 )
             )

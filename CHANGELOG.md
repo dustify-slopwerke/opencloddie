@@ -11,6 +11,11 @@ All notable changes to opencloddie are documented here.  The format follows
 - WebGL renderer for the browser terminal (`@xterm/addon-webgl` 0.18.0), with
   automatic fallback to xterm's DOM renderer when WebGL2 is unavailable or the
   GPU context is lost.
+- Mobile drag-to-scroll: a one-finger pan sends wheel reports to tmux
+  copy-mode.  The client enables mouse mode on its own tmux session (the
+  session option, not the user's global setting) and advertises the
+  capability to the web UI, so older clients keep their previous touch
+  behaviour.
 
 ### Fixed
 
@@ -18,6 +23,12 @@ All notable changes to opencloddie are documented here.  The format follows
   on-screen keyboard opens only when the terminal is tapped.
 - Mobile: the app now follows `visualViewport`, so the keyboard shrinks the
   layout above it instead of covering the terminal and cursor.
+- Fast scrolling no longer blocks the agent: pane input is buffered and
+  written by a small writer thread, so the agent keeps reading its WebSocket
+  while a TUI is busy redrawing.
+- The agent resets its reconnect backoff after a connection stays up, so a
+  single drop no longer leaves later reconnects waiting 30 seconds.
+- Agent connection closures now log the initiator and reason.
 
 ## [0.2.0] - 2026-11-08
 

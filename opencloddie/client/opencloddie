@@ -291,6 +291,28 @@ def tmux_kill(name: str) -> bool:
     ).returncode == 0
 
 
+def tmux_enable_mouse(name: str) -> bool:
+    """Let the web terminal's wheel/touch pan scroll tmux copy-mode.
+
+    The option is set on this session only, so the user's other tmux sessions
+    keep their own mouse setting.  Older tmux versions reject a per-session
+    mouse option; drag-to-scroll then stays unavailable rather than changing
+    the global setting behind the user's back.
+    """
+    if not name or not shutil.which("tmux"):
+        return False
+    try:
+        result = subprocess.run(
+            ["tmux", "set-option", "-t", name, "mouse", "on"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -444,6 +466,7 @@ def start_local_session(cfg: dict, name: str, cwd: str, claude_args: list[str], 
                 "opencloddie: could not create tmux session: "
                 + (result.stderr.strip() or f"exit {result.returncode}")
             )
+    tmux_enable_mouse(item["tmux"])
     ensure_agent(cfg, item)
     if not me.get("opencode_key_set"):
         print(
@@ -951,11 +974,21 @@ def _read_frame(rfile, require_mask: bool):
 # --------------------------------------------------------------------------
 # PTY helpers (standalone)
 # --------------------------------------------------------------------------
+MAX_PENDING_INPUT = 256 * 1024
+
+
 class Pty:
     def __init__(self, master: int, proc: subprocess.Popen):
         self.master = master
         self.proc = proc
         self.closed = False
+        try:
+            os.set_blocking(self.master, False)
+        except OSError:
+            pass
+        self._pending = bytearray()
+        self._pending_lock = threading.Lock()
+        self._flusher: threading.Thread | None = None
 
     def resize(self, cols: int, rows: int) -> None:
         try:
@@ -968,20 +1001,66 @@ class Pty:
             pass
 
     def write(self, data: bytes) -> None:
-        view = memoryview(data)
-        while view:
+        """Queue input for the pane without blocking the WebSocket reader.
+
+        A synchronous write blocks once the pane's input buffer is full (for
+        example during a fast wheel scroll while the TUI is redrawing).  That
+        stalls the agent's frame reader, which in turn blocks the server's
+        writes and eventually drops the agent connection.  Buffer a bounded
+        amount and let a small writer thread drain it instead.
+        """
+        with self._pending_lock:
+            if self.closed:
+                return
+            if len(self._pending) + len(data) > MAX_PENDING_INPUT:
+                # Overwhelmed input (usually repeat scroll events) is dropped
+                # rather than growing memory without bound.
+                return
+            self._pending += data
+            if self._flusher is None:
+                self._flusher = threading.Thread(
+                    target=self._flush_loop,
+                    name=f"pty-write-{self.master}",
+                    daemon=True,
+                )
+                self._flusher.start()
+
+    def _flush_loop(self) -> None:
+        while True:
+            with self._pending_lock:
+                if self.closed or not self._pending:
+                    self._pending.clear()
+                    self._flusher = None
+                    return
+                chunk = bytes(self._pending)
             try:
-                written = os.write(self.master, view)
+                written = os.write(self.master, chunk)
             except (BlockingIOError, InterruptedError):
+                try:
+                    select.select([], [self.master], [], 0.2)
+                except (OSError, ValueError):
+                    with self._pending_lock:
+                        self._pending.clear()
+                        self._flusher = None
+                    return
                 continue
             except OSError:
+                with self._pending_lock:
+                    self._pending.clear()
+                    self._flusher = None
                 return
-            view = view[written:]
+            if written <= 0:
+                with self._pending_lock:
+                    self._pending.clear()
+                    self._flusher = None
+                return
+            with self._pending_lock:
+                del self._pending[:written]
 
     def close(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
+        with self._pending_lock:
+            self.closed = True
+            self._pending.clear()
         try:
             if self.proc.poll() is None:
                 self.proc.terminate()
@@ -1033,6 +1112,8 @@ def pump_pty(proc: Pty, on_data, stop: threading.Event) -> None:
             continue
         try:
             data = os.read(proc.master, 65536)
+        except (BlockingIOError, InterruptedError):
+            continue
         except OSError:
             break
         if not data:
@@ -1077,6 +1158,7 @@ class Agent:
         self.ws_lock = threading.Lock()
         self.channels: dict[int, tuple[Pty, threading.Event]] = {}
         self.channels_lock = threading.Lock()
+        self.features: dict[str, bool] = {}
 
     def log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -1089,6 +1171,7 @@ class Agent:
         return cfg
 
     def run(self) -> int:
+        self.features["mouse"] = tmux_enable_mouse(self.tmux)
         threading.Thread(target=self._monitor, name="monitor", daemon=True).start()
         backoff = 1.0
         while not self.stop_event.is_set():
@@ -1096,6 +1179,7 @@ class Agent:
                 self.log(f"tmux session {self.tmux} is gone; exiting")
                 self.stop()
                 break
+            started = time.monotonic()
             try:
                 self._session()
                 backoff = 1.0
@@ -1113,6 +1197,11 @@ class Agent:
                 if self.stop_event.is_set():
                     break
                 self.log(f"connection error: {type(exc).__name__}: {exc}")
+            # A connection that stayed up for a while was healthy; start its
+            # retry delay over instead of letting backoff ratchet to 30s for
+            # the rest of the process's lifetime.
+            if time.monotonic() - started >= 30:
+                backoff = 1.0
             if self.stop_event.is_set():
                 break
             self.stop_event.wait(backoff)
@@ -1164,6 +1253,7 @@ class Agent:
                 "version": VERSION,
                 "hostname": socket.gethostname(),
                 "platform": sys.platform,
+                "features": self.features,
                 "session": {
                     "id": self.session_id,
                     "name": self.name,

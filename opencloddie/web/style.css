@@ -254,7 +254,8 @@ pre {
 .terminal-area { position: relative; flex: 1; min-height: 0; background: #07090c; }
 .terminals { position: absolute; inset: 0; }
 .term-wrap { position: absolute; inset: 0; padding: 10px 12px 12px; display: flex; flex-direction: column; }
-.tile-term { flex: 1; min-height: 0; position: relative; }
+/* Touch pans drive tmux copy-mode through the app's own handler. */
+.tile-term { flex: 1; min-height: 0; position: relative; touch-action: none; }
 .tile-head { display: none; }
 .term-wrap .xterm {
   height: 100%;

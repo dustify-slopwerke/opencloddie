@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import logging
 import queue
 import re
 import threading
@@ -19,6 +20,9 @@ from typing import Any
 
 from .auth import ApiIdentity
 from .util import iso, utcnow
+from .websocket import WSClosed
+
+log = logging.getLogger("opencloddie.agent")
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -74,6 +78,7 @@ class AgentConnection:
     session_id: str = ""
     hostname: str = ""
     last_seen: float = field(default_factory=time.time)
+    features: dict[str, bool] = field(default_factory=dict)
     channels: dict[int, Channel] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     alive: bool = True
@@ -83,8 +88,20 @@ class AgentConnection:
         try:
             self.ws.send_text(json.dumps(obj, separators=(",", ":")))
             return True
-        except Exception:  # noqa: BLE001 - connection is gone
-            self.close()
+        except WSClosed:
+            # The connection was already closed (for example by a concurrent
+            # close while a channel was shutting down); not worth a warning.
+            self.close(reason="already closed")
+            return False
+        except Exception as exc:  # noqa: BLE001 - connection is gone
+            log.warning(
+                "agent send failed (agent=%s session=%s): %s: %s",
+                self.agent_id,
+                self.session_id,
+                type(exc).__name__,
+                exc,
+            )
+            self.close(reason=f"send failed: {type(exc).__name__}")
             return False
 
     def open_channel(self, cols: int, rows: int) -> Channel:
@@ -186,6 +203,12 @@ class AgentConnection:
             self.alive = False
             channels = list(self.channels.values())
             self.channels.clear()
+        log.info(
+            "agent connection closed (agent=%s session=%s): %s",
+            self.agent_id,
+            self.session_id,
+            reason or "closed",
+        )
         for channel in channels:
             channel.put("exit", None)
         try:
@@ -231,6 +254,10 @@ class AgentHub:
         conn = AgentConnection(self, ws, identity, agent_id)
         conn.session_id = session_id
         conn.hostname = hostname
+        features = hello.get("features")
+        if isinstance(features, dict):
+            # Only advertise capabilities this server knows how to use.
+            conn.features = {"mouse": bool(features.get("mouse"))}
 
         try:
             self.app.db.upsert_session(

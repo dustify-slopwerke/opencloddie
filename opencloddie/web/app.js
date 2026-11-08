@@ -17,6 +17,7 @@ const state = {
 };
 
 const TMUX_BUFFER_FRESH_SECONDS = 120;
+const UTF8 = new TextEncoder();
 
 const TERM_THEME = {
   background: '#07090c',
@@ -894,6 +895,7 @@ function ensureTerminal(session) {
     pendingBuffer: null,
     bufferTimer: null,
     webglTried: false,
+    mouseScroll: false,
   };
   state.terminals.set(session.id, entry);
   setupTerminalClipboard(entry);
@@ -918,12 +920,8 @@ function ensureTerminal(session) {
     if (state.activeId !== session.id) activate(session.id, { quiet: true });
   });
 
-  term.onData((data) => {
-    entry.selection = '';
-    if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
-      entry.ws.send(new TextEncoder().encode(data));
-    }
-  });
+  term.onData((data) => sendTerminalInput(entry, data));
+  setupTouchScroll(entry);
   term.onResize(({ cols, rows }) => {
     sendControl(entry, { t: 'resize', cols, rows });
   });
@@ -971,6 +969,79 @@ function sendControl(entry, message) {
   if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
     entry.ws.send(JSON.stringify(message));
   }
+}
+
+function sendTerminalInput(entry, data) {
+  entry.selection = '';
+  if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+    entry.ws.send(typeof data === 'string' ? UTF8.encode(data) : data);
+  }
+}
+
+// tmux enables mouse reporting for opencloddie sessions, so desktop wheel
+// events already scroll its copy-mode history.  xterm does not turn touch
+// drags into wheel events, so translate a one-finger pan into SGR wheel
+// reports.  The agent advertises `features.mouse`; without it we leave touch
+// input alone rather than sending escape sequences tmux would treat as text.
+const TOUCH_SCROLL_STEP = 30; // finger pixels per wheel notch
+const TOUCH_DRAG_SLOP = 6;
+
+function setupTouchScroll(entry) {
+  const el = entry.termEl;
+  let startY = null;
+  let lastY = 0;
+  let budget = 0;
+  let moved = false;
+  let suppressMouse = false;
+
+  el.addEventListener('touchstart', (event) => {
+    if (event.touches.length !== 1) { startY = null; return; }
+    startY = lastY = event.touches[0].clientY;
+    budget = 0;
+    moved = false;
+  }, { passive: true });
+
+  el.addEventListener('touchmove', (event) => {
+    if (!entry.mouseScroll || startY === null || event.touches.length !== 1) return;
+    const y = event.touches[0].clientY;
+    budget += lastY - y; // finger up => positive => scroll forward
+    lastY = y;
+    if (Math.abs(y - startY) > TOUCH_DRAG_SLOP) moved = true;
+    event.preventDefault();
+    while (budget >= TOUCH_SCROLL_STEP) {
+      sendTerminalInput(entry, `\x1b[<65;1;1M`); // wheel down
+      budget -= TOUCH_SCROLL_STEP;
+    }
+    while (budget <= -TOUCH_SCROLL_STEP) {
+      sendTerminalInput(entry, `\x1b[<64;1;1M`); // wheel up
+      budget += TOUCH_SCROLL_STEP;
+    }
+  }, { passive: false });
+
+  el.addEventListener('touchend', () => {
+    if (moved) {
+      // Do not let a drag become a synthetic click that focuses the terminal
+      // and opens the on-screen keyboard.
+      suppressMouse = true;
+      setTimeout(() => { suppressMouse = false; }, 400);
+    }
+    startY = null;
+    budget = 0;
+  }, { passive: true });
+
+  el.addEventListener('touchcancel', () => {
+    startY = null;
+    budget = 0;
+  }, { passive: true });
+
+  // Capture phase so xterm's mousedown handler never sees the click after a
+  // drag gesture.
+  el.addEventListener('mousedown', (event) => {
+    if (!suppressMouse) return;
+    suppressMouse = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
 }
 
 function copySelection() {
@@ -1064,6 +1135,7 @@ function connectTerminal(entry, session) {
       if (!message) return;
       if (message.t === 'hello' && message.session) {
         Object.assign(entry.session, message.session);
+        entry.mouseScroll = Boolean(message.agent_features && message.agent_features.mouse);
         updateStatusline(entry);
       } else if (message.t === 'error') {
         toast(message.message || 'terminal error', 'error');

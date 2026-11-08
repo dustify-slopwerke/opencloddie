@@ -134,6 +134,15 @@ class AgentEndToEndTest(unittest.TestCase):
             hello = json.loads(payload)
             self.assertEqual(hello["t"], "hello")
             self.assertEqual(hello["session"]["name"], "e2e")
+            # The agent enables mouse mode on its own session so the web
+            # terminal can scroll tmux copy-mode (wheel and touch pan).
+            self.assertEqual(hello.get("agent_features"), {"mouse": True})
+            mouse = subprocess.run(
+                [TMUX, "show-options", "-t", self.tmux_name, "mouse"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mouse.stdout.strip(), "mouse on")
 
             ws.send_text(json.dumps({"t": "resize", "cols": 123, "rows": 45}))
             # This is the regression test for the missing TIOCSCTTY: without
