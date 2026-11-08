@@ -82,6 +82,23 @@ def write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+TIOCSCTTY = getattr(termios, "TIOCSCTTY", None)
+
+
+def _make_controlling_tty() -> None:
+    """Child-side hook: attach the PTY slave as the controlling terminal.
+
+    Without this the kernel does not deliver SIGWINCH when the PTY is
+    resized, so `tmux attach` never notices browser resizes.
+    """
+    if TIOCSCTTY is None:
+        return
+    try:
+        fcntl.ioctl(0, TIOCSCTTY, 0)
+    except OSError:
+        pass
+
+
 @dataclass
 class PtyProcess:
     master_fd: int
@@ -148,8 +165,8 @@ def spawn_pty(
     cols: int = 120,
     rows: int = 32,
 ) -> PtyProcess:
-    """Start argv on a fresh PTY.  The child gets its own session but the PTY
-    slave is a real tty, which is enough for tmux attach and Claude Code."""
+    """Start argv on a fresh PTY.  The child gets a controlling terminal so
+    SIGWINCH is delivered when the PTY is resized (tmux attach needs this)."""
     master_fd, slave_fd = pty.openpty()
     try:
         set_winsize(slave_fd, cols, rows)
@@ -163,6 +180,7 @@ def spawn_pty(
             cwd=cwd,
             env=child_env,
             start_new_session=True,
+            preexec_fn=_make_controlling_tty,
             close_fds=True,
         )
     except Exception:

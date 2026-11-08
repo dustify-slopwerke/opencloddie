@@ -50,6 +50,22 @@ Usually a proxy timeout or buffering.  Use the nginx snippet's
 `proxy_buffering off`.  Reload the tab; the WS reconnect creates a fresh
 `tmux attach` and redraws.
 
+**Web terminal resizes in the browser but tmux stays 80x24**
+Clients before the `TIOCSCTTY` fix spawned `tmux attach` without a controlling
+terminal, so the PTY resize never produced `SIGWINCH` inside tmux.  Update the
+client on the host and restart its agent (the tmux session and Claude survive):
+
+```bash
+curl -fsSL https://oc.dustify.com/install/opencloddie -o ~/.local/bin/opencloddie
+chmod +x ~/.local/bin/opencloddie
+ps -eo pid,args | grep '[o]pencloddie __agent'
+kill <pid-for-that-session>
+opencloddie attach <name>
+```
+
+Verify with `tmux list-clients -F '#{client_session} #{client_width}x#{client_height}'`
+while resizing the browser.  On current clients the client width/height changes.
+
 **Web UI logs out / 302 loops**
 Authelia session expired; log in again.  Long-lived terminal WebSockets stay
 open until closed, but new API calls redirect.

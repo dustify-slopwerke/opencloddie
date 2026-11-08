@@ -1010,6 +1010,7 @@ def spawn_pty(argv: list[str], cols: int, rows: int) -> Pty:
             stderr=slave,
             env=env,
             start_new_session=True,
+            preexec_fn=_make_controlling_tty,
             close_fds=True,
         )
     except Exception:
@@ -1040,6 +1041,24 @@ def pump_pty(proc: Pty, on_data, stop: threading.Event) -> None:
             on_data(data)
         except Exception:  # noqa: BLE001
             break
+
+
+TIOCSCTTY = getattr(termios, "TIOCSCTTY", None)
+
+
+def _make_controlling_tty() -> None:
+    """Make the PTY slave the child's controlling terminal.
+
+    Without TIOCSCTTY the kernel does not deliver SIGWINCH to `tmux attach`,
+    so browser resizes change the PTY size but tmux never resizes its client.
+    Runs in the forked child before exec.
+    """
+    if TIOCSCTTY is None:
+        return
+    try:
+        fcntl.ioctl(0, TIOCSCTTY, 0)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -1132,6 +1151,10 @@ class Agent:
         url = server + "/agent/ws?agent_id=" + urllib.parse.quote(self.agent_id)
         self.log(f"connecting to {server}")
         ws = WSClient.connect(url, headers={"Authorization": f"Bearer {cfg['api_key']}"}, timeout=20)
+        # WSClient keeps the handshake timeout on the socket.  Heartbeats are
+        # every 20s, so a 20s read timeout races the pong and reconnects the
+        # agent every few minutes.  Allow a few missed heartbeats.
+        ws.sock.settimeout(75)
         with self.ws_lock:
             self.ws = ws
         ws.send_json(

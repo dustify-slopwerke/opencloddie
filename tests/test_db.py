@@ -86,6 +86,33 @@ class DatabaseTest(unittest.TestCase):
         self.assertTrue(self.db.delete_session("s_one", alice["id"]))
         self.assertIsNone(self.db.get_session("s_one"))
 
+    def test_list_sessions_order_is_stable(self):
+        user = self.db.ensure_user("alice")
+        key, _ = self.db.create_api_key(user["id"], "k", "m")
+        for name in ("one", "two", "three"):
+            self.db.upsert_session(
+                session_id=f"s_{name}",
+                user_id=user["id"],
+                api_key_id=key["id"],
+                name=name,
+                hostname="host",
+                cwd="/tmp",
+                model="m",
+                agent_id=f"a_{name}",
+            )
+        first = [s["id"] for s in self.db.list_sessions(user["id"])]
+        self.assertEqual(len(first), 3)
+        # Simulate a heartbeat/last_seen update on the session that is last in
+        # the list.  Sorting by last_seen_at (the old behavior) would move it
+        # to the front and make web tabs jump every poll.
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute(
+                "UPDATE sessions SET last_seen_at='2099-01-01T00:00:00Z' WHERE id=?",
+                (first[-1],),
+            )
+        second = [s["id"] for s in self.db.list_sessions(user["id"])]
+        self.assertEqual(first, second)
+
     def test_mark_all_offline_and_stats(self):
         user = self.db.ensure_user("alice")
         key, _ = self.db.create_api_key(user["id"], "k", "m")

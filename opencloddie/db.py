@@ -333,7 +333,9 @@ class Database:
         query = "SELECT * FROM sessions WHERE user_id=?"
         if not include_offline:
             query += " AND online=1"
-        query += " ORDER BY online DESC, last_seen_at DESC"
+        # created_at/id gives the web UI a stable tab order.  Sorting by
+        # last_seen_at (or online) made tabs jump every heartbeat.
+        query += " ORDER BY created_at ASC, id ASC"
         with self.lock:
             rows = self.conn.execute(query, (user_id,)).fetchall()
         return [dict(r) for r in rows]

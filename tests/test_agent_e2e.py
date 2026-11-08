@@ -103,6 +103,18 @@ class AgentEndToEndTest(unittest.TestCase):
         except OSError:
             return ""
 
+    def _client_size(self):
+        result = subprocess.run(
+            ["tmux", "list-clients", "-F", "#{client_session}\t#{client_width}x#{client_height}"],
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            session, _, size = line.partition("\t")
+            if session == self.tmux_name:
+                return size
+        return None
+
     def test_terminal_roundtrip_and_kill(self):
         status, _, data = self.server.api_json("GET", "/client/sessions", self.token)
         self.assertEqual(status, 200)
@@ -122,7 +134,14 @@ class AgentEndToEndTest(unittest.TestCase):
             self.assertEqual(hello["t"], "hello")
             self.assertEqual(hello["session"]["name"], "e2e")
 
-            ws.send_text(json.dumps({"t": "resize", "cols": 100, "rows": 30}))
+            ws.send_text(json.dumps({"t": "resize", "cols": 123, "rows": 45}))
+            # This is the regression test for the missing TIOCSCTTY: without
+            # it the agent's tmux attach never receives SIGWINCH and keeps
+            # the initial size.
+            self.assertTrue(
+                wait_for(lambda: self._client_size() == "123x45", timeout=8),
+                f"tmux client size stayed {self._client_size()!r}",
+            )
             marker = "E2E_MARKER_" + uuid.uuid4().hex[:8]
             ws.send_binary(f"echo {marker}\r".encode())
             output = b""
