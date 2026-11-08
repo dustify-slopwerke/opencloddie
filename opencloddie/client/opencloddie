@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import fcntl
 import getpass
 import hashlib
@@ -818,12 +819,43 @@ class WSClosed(Exception):
 
 
 class WSClient:
-    def __init__(self, sock, rfile, wfile):
+    """WebSocket client driven by a single thread.
+
+    Python's SSLSocket is not safe for a blocking read and a write at the
+    same time: under load the two threads corrupt the TLS record stream and
+    the peer closes with a bad-record-mac alert.  That is what used to drop
+    the agent whenever a busy terminal pushed output while the heartbeat or
+    a keystroke was being sent.  All socket I/O now happens in the thread
+    that calls recv(); other threads enqueue frames and wake it through a
+    pipe.
+    """
+
+    MAX_OUTBOX = 8 * 1024 * 1024
+    MAX_MESSAGE = 16 * 1024 * 1024
+
+    def __init__(self, sock, rfile):
         self.sock = sock
-        self.rfile = rfile
-        self.wfile = wfile
+        self.rfile = rfile  # used only during the HTTP upgrade
         self.lock = threading.Lock()
         self.closed = False
+        self._outbox = collections.deque()
+        self._outbox_bytes = 0
+        self._inbuf = bytearray()
+        self._messages = collections.deque()
+        self._partial = []
+        self._partial_opcode = None
+        self._partial_bytes = 0
+        self._socket_closed = False
+        self._want_write = False
+        self._close_deadline = float("inf")
+        self._io_lock = threading.Lock()
+        self._wake_r, self._wake_w = os.pipe()
+        os.set_blocking(self._wake_r, False)
+        os.set_blocking(self._wake_w, False)
+        try:
+            sock.setblocking(False)
+        except OSError:
+            pass
 
     @classmethod
     def connect(cls, url: str, headers: dict | None = None, timeout: float | None = 20.0):
@@ -873,25 +905,194 @@ class WSClient:
         if accept != expected:
             raw.close()
             raise WSClosed("invalid Sec-WebSocket-Accept")
-        raw.settimeout(None if timeout is None else timeout)
-        return cls(raw, rfile, raw.makefile("wb"))
+        return cls(raw, rfile)
 
     def send(self, opcode: int, payload: bytes) -> None:
+        frame = _encode(opcode, payload, mask=True)
         with self.lock:
             if self.closed:
                 raise WSClosed("closed")
-            self.wfile.write(_encode(opcode, payload, mask=True))
-            self.wfile.flush()
+            if opcode < OP_CLOSE and self._outbox_bytes + len(frame) > self.MAX_OUTBOX:
+                # The peer is not draining; drop new data rather than grow
+                # without bound (the agent's PTY pump would otherwise stall).
+                return
+            self._outbox.append(frame)
+            self._outbox_bytes += len(frame)
+        self._wake()
 
     def send_json(self, obj: dict) -> None:
         self.send(OP_TEXT, json.dumps(obj, separators=(",", ":")).encode("utf-8"))
 
     def recv(self):
-        chunks = []
-        opcode_msg = None
-        total = 0
+        """Return the next complete message, doing all socket I/O here."""
+        with self._io_lock:
+            return self._recv_locked()
+
+    def _recv_locked(self):
         while True:
-            opcode, payload, fin = _read_frame(self.rfile, require_mask=False)
+            if self._messages:
+                return self._messages.popleft()
+            if self.closed:
+                try:
+                    self._flush()
+                except WSClosed:
+                    pass
+                with self.lock:
+                    drained = not self._outbox
+                if drained or time.monotonic() >= self._close_deadline:
+                    self._shutdown()
+                    raise WSClosed("closed")
+            wlist = [self.sock] if (self._outbox or self._want_write) else []
+            try:
+                readable, writable, _ = select.select([self.sock, self._wake_r], wlist, [], 1.0)
+            except (OSError, ValueError) as exc:
+                self._shutdown()
+                raise WSClosed(f"select failed: {exc}") from exc
+            if self._wake_r in readable:
+                self._drain_wake()
+            if self.sock in writable:
+                try:
+                    self._flush()
+                except WSClosed:
+                    self._shutdown()
+                    raise
+            if self.sock in readable:
+                try:
+                    self._read_available()
+                except WSClosed:
+                    self._shutdown()
+                    raise
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            self._close_deadline = time.monotonic() + 2.0
+            frame = _encode(OP_CLOSE, struct.pack("!H", 1000), mask=True)
+            self._outbox.append(frame)
+            self._outbox_bytes += len(frame)
+        self._wake()
+
+    def wait_closed(self, timeout: float = 1.5) -> None:
+        """Flush a queued close frame, then release the socket."""
+        with self._io_lock:
+            self._wait_closed_locked(timeout)
+
+    def _wait_closed_locked(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                if self._socket_closed:
+                    return
+                drained = not self._outbox
+            if not drained:
+                try:
+                    self._flush()
+                except WSClosed:
+                    break
+                with self.lock:
+                    drained = not self._outbox
+            if drained or time.monotonic() >= deadline:
+                break
+            try:
+                select.select([self.sock], [self.sock], [], 0.05)
+            except (OSError, ValueError):
+                break
+        self._shutdown()
+
+    # ------------------------------------------------------------- internals
+    def _wake(self) -> None:
+        try:
+            os.write(self._wake_w, b"\0")
+        except (BlockingIOError, OSError):
+            pass
+
+    def _drain_wake(self) -> None:
+        try:
+            while os.read(self._wake_r, 4096):
+                pass
+        except (BlockingIOError, OSError):
+            pass
+
+    def _flush(self) -> None:
+        while True:
+            with self.lock:
+                if not self._outbox:
+                    self._want_write = False
+                    return
+                chunk = self._outbox[0]
+            try:
+                written = self.sock.send(chunk)
+            except (ssl.SSLWantWriteError, BlockingIOError):
+                self._want_write = True
+                return
+            except ssl.SSLWantReadError:
+                self._want_write = False
+                return
+            except (OSError, ValueError) as exc:
+                raise WSClosed(f"socket send failed: {exc}") from exc
+            if written <= 0:
+                raise WSClosed("socket closed during send")
+            with self.lock:
+                if written >= len(chunk):
+                    self._outbox.popleft()
+                    self._outbox_bytes -= len(chunk)
+                else:
+                    self._outbox[0] = chunk[written:]
+                    self._outbox_bytes -= written
+            self._want_write = False
+
+    def _read_available(self) -> None:
+        while True:
+            try:
+                data = self.sock.recv(65536)
+            except (ssl.SSLWantReadError, BlockingIOError):
+                break
+            except ssl.SSLWantWriteError:
+                self._want_write = True
+                break
+            except (OSError, ValueError) as exc:
+                raise WSClosed(f"socket read failed: {exc}") from exc
+            if not data:
+                raise WSClosed("unexpected EOF")
+            self._inbuf.extend(data)
+        self._parse()
+
+    def _parse(self) -> None:
+        while True:
+            if len(self._inbuf) < 2:
+                return
+            b1, b2 = self._inbuf[0], self._inbuf[1]
+            fin = bool(b1 & 0x80)
+            opcode = b1 & 0x0F
+            masked = bool(b2 & 0x80)
+            n = b2 & 0x7F
+            offset = 2
+            if n == 126:
+                if len(self._inbuf) < 4:
+                    return
+                n = struct.unpack("!H", self._inbuf[2:4])[0]
+                offset = 4
+            elif n == 127:
+                if len(self._inbuf) < 10:
+                    return
+                n = struct.unpack("!Q", self._inbuf[2:10])[0]
+                offset = 10
+            if n > self.MAX_MESSAGE:
+                raise WSClosed("frame too large")
+            key = b""
+            if masked:
+                if len(self._inbuf) < offset + 4:
+                    return
+                key = bytes(self._inbuf[offset : offset + 4])
+                offset += 4
+            if len(self._inbuf) < offset + n:
+                return
+            payload = bytes(self._inbuf[offset : offset + n])
+            del self._inbuf[: offset + n]
+            if masked:
+                payload = _mask_payload(payload, key)
             if opcode == OP_CLOSE:
                 raise WSClosed("server closed")
             if opcode == OP_PING:
@@ -900,33 +1101,47 @@ class WSClient:
             if opcode == OP_PONG:
                 continue
             if opcode == OP_CONT:
-                if opcode_msg is None:
+                if self._partial_opcode is None:
                     raise WSClosed("bad continuation")
             else:
-                if opcode_msg is not None:
+                if self._partial_opcode is not None:
                     raise WSClosed("interleaved message")
-                opcode_msg = opcode
-            chunks.append(payload)
-            total += len(payload)
-            if total > 16 * 1024 * 1024:
+                self._partial_opcode = opcode
+            self._partial.append(payload)
+            self._partial_bytes += len(payload)
+            if self._partial_bytes > self.MAX_MESSAGE:
                 raise WSClosed("message too large")
             if fin:
-                return opcode_msg, b"".join(chunks)
+                self._messages.append((self._partial_opcode, b"".join(self._partial)))
+                self._partial = []
+                self._partial_opcode = None
+                self._partial_bytes = 0
 
-    def close(self) -> None:
+    def _shutdown(self) -> None:
         with self.lock:
-            if self.closed:
+            if self._socket_closed:
                 return
+            self._socket_closed = True
             self.closed = True
+            self._outbox.clear()
+            self._outbox_bytes = 0
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        for fd in (self._wake_r, self._wake_w):
             try:
-                self.wfile.write(_encode(OP_CLOSE, struct.pack("!H", 1000), mask=True))
-                self.wfile.flush()
+                os.close(fd)
             except OSError:
                 pass
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+
+
+def _mask_payload(payload: bytes, key: bytes) -> bytes:
+    n = len(payload)
+    if not n:
+        return payload
+    stream = (key * ((n + 3) // 4))[:n]
+    return (int.from_bytes(payload, "big") ^ int.from_bytes(stream, "big")).to_bytes(n, "big")
 
 
 def _encode(opcode: int, payload: bytes, *, mask: bool) -> bytes:
@@ -942,33 +1157,7 @@ def _encode(opcode: int, payload: bytes, *, mask: bool) -> bytes:
     if not mask:
         return header + payload
     key = os.urandom(4)
-    return header + key + bytes(b ^ key[i % 4] for i, b in enumerate(payload))
-
-
-def _read_exact(rfile, n: int) -> bytes:
-    data = rfile.read(n)
-    if data is None or len(data) < n:
-        raise WSClosed("unexpected EOF")
-    return data
-
-
-def _read_frame(rfile, require_mask: bool):
-    head = _read_exact(rfile, 2)
-    fin = bool(head[0] & 0x80)
-    opcode = head[0] & 0x0F
-    masked = bool(head[1] & 0x80)
-    n = head[1] & 0x7F
-    if n == 126:
-        n = struct.unpack("!H", _read_exact(rfile, 2))[0]
-    elif n == 127:
-        n = struct.unpack("!Q", _read_exact(rfile, 8))[0]
-    if n > 16 * 1024 * 1024:
-        raise WSClosed("frame too large")
-    key = _read_exact(rfile, 4) if masked else b""
-    payload = _read_exact(rfile, n) if n else b""
-    if masked:
-        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
-    return opcode, payload, fin
+    return header + key + _mask_payload(payload, key)
 
 
 # --------------------------------------------------------------------------
@@ -1159,6 +1348,7 @@ class Agent:
         self.channels: dict[int, tuple[Pty, threading.Event]] = {}
         self.channels_lock = threading.Lock()
         self.features: dict[str, bool] = {}
+        self._send_warned = False
 
     def log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -1240,10 +1430,9 @@ class Agent:
         url = server + "/agent/ws?agent_id=" + urllib.parse.quote(self.agent_id)
         self.log(f"connecting to {server}")
         ws = WSClient.connect(url, headers={"Authorization": f"Bearer {cfg['api_key']}"}, timeout=20)
-        # WSClient keeps the handshake timeout on the socket.  Heartbeats are
-        # every 20s, so a 20s read timeout races the pong and reconnects the
-        # agent every few minutes.  Allow a few missed heartbeats.
-        ws.sock.settimeout(75)
+        self._send_warned = False
+        # The I/O loop is non-blocking and woken by writes; liveness comes
+        # from the 20s heartbeat, not a socket read timeout.
         with self.ws_lock:
             self.ws = ws
         ws.send_json(
@@ -1308,6 +1497,7 @@ class Agent:
             self._close_all_channels()
             try:
                 ws.close()
+                ws.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
             if not welcome_seen:
@@ -1317,7 +1507,10 @@ class Agent:
         while not self.stop_event.wait(20):
             try:
                 ws.send_json({"t": "ping", "ts": time.time()})
-            except Exception:  # noqa: BLE001
+            except WSClosed:
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"heartbeat stopped: {type(exc).__name__}: {exc}")
                 return
 
     def _open_channel(self, message: dict) -> None:
@@ -1431,8 +1624,12 @@ class Agent:
             return
         try:
             ws.send_json(obj)
-        except Exception:  # noqa: BLE001
+        except WSClosed:
             pass
+        except Exception as exc:  # noqa: BLE001
+            if not self._send_warned:
+                self._send_warned = True
+                self.log(f"send failed: {type(exc).__name__}: {exc}")
 
 
 def cmd_agent(args: argparse.Namespace) -> int:

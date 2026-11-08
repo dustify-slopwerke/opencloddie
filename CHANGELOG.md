@@ -23,6 +23,10 @@ All notable changes to opencloddie are documented here.  The format follows
   on-screen keyboard opens only when the terminal is tapped.
 - Mobile: the app now follows `visualViewport`, so the keyboard shrinks the
   layout above it instead of covering the terminal and cursor.
+- The agent's WebSocket transport now performs all TLS socket I/O in a single
+  thread.  Concurrent reads and writes on Python's `SSLSocket` could corrupt
+  the TLS record stream under load (`BAD_RECORD_MAC`), which is what closed
+  the agent connection during fast scrolling.
 - Fast scrolling no longer blocks the agent: pane input is buffered and
   written by a small writer thread, so the agent keeps reading its WebSocket
   while a TUI is busy redrawing.

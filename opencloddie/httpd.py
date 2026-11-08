@@ -885,8 +885,14 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if isinstance(message, dict):
                     conn.dispatch(message)
-        except (WSClosed, OSError, socket.timeout, TimeoutError):
-            pass
+        except (WSClosed, OSError, socket.timeout, TimeoutError) as exc:
+            log.info(
+                "agent websocket ended (agent=%s session=%s): %s: %s",
+                conn.agent_id,
+                conn.session_id,
+                type(exc).__name__,
+                exc,
+            )
         except Exception:  # noqa: BLE001
             log.exception("agent connection error")
         finally:
