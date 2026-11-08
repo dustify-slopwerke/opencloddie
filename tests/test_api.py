@@ -93,7 +93,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b".rail.is-open", css)
         self.assertIn(b".terminals.tiled", css)
-        self.assertIn(b"::-webkit-scrollbar-button", css)
+        self.assertIn(b"scrollbar-width: none", css)
+        self.assertIn(b"scrollback: 0", js)
 
     # ------------------------------------------------------------ opencode
     def test_opencode_key_lifecycle(self):

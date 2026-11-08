@@ -815,7 +815,7 @@ function ensureTerminal(session) {
     fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
     fontSize: 13,
     lineHeight: 1.15,
-    scrollback: 8000,
+    scrollback: 0,
     allowProposedApi: true,
     theme: TERM_THEME,
   });

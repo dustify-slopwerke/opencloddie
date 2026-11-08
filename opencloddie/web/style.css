@@ -257,30 +257,15 @@ pre {
 .term-wrap .xterm {
   height: 100%;
   max-width: 100%;
-  padding: 0 2px 0 0; /* keep glyphs clear of the scrollbar edge */
   overflow: hidden;
 }
 .term-wrap .xterm-viewport {
-  /* A stable, measurable scrollbar avoids overlay scrollbars painting over
-     the last terminal column (FitAddon subtracts this width). */
-  scrollbar-gutter: stable;
+  /* A tmux client uses the alternate screen, so xterm's scrollback is always
+     empty. Hide the bar and let FitAddon use the full width for columns. */
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
-/* Chromium/WebKit: draw a slim bar ourselves and suppress the native arrow
-   buttons, which otherwise float at the top and bottom of the viewport. */
-.term-wrap .xterm-viewport::-webkit-scrollbar { width: 12px; }
-.term-wrap .xterm-viewport::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-.term-wrap .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb {
-  background: #2d3948;
-  border: 3px solid transparent;
-  border-radius: 6px;
-  background-clip: content-box;
-}
-.term-wrap .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #3b4a5c; background-clip: content-box; }
-/* Firefox has neither WebKit pseudo-elements nor scrollbar buttons. */
-@supports not selector(::-webkit-scrollbar) {
-  .term-wrap .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2d3948 transparent; }
-}
+.term-wrap .xterm-viewport::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .term-wrap.hidden { display: none; }
 
 /* Tiled session layout */
@@ -326,8 +311,7 @@ pre {
 .terminals.tiled .tile-term { flex: 1; min-height: 0; min-width: 0; padding: 0; overflow: hidden; }
 /* FitAddon subtracts .xterm's padding but not its parent's, so keep the tile
    gutters on .xterm; otherwise the bottom of the last row is clipped. No
-   horizontal padding: every pixel goes to terminal columns, and FitAddon
-   already reserves the scrollbar width. */
+   horizontal padding: every pixel goes to terminal columns. */
 .terminals.tiled .term-wrap .xterm { padding: 4px 0 6px 0; }
 .terminals.tiled .term-wrap.is-offline .tile-term { opacity: .25; }
 .tile-offline {
