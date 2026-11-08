@@ -197,6 +197,7 @@ docs/                        architecture, API, client, security, dev, ops
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, data flow, protocols, schema |
 | [deploy/README.md](deploy/README.md) | Docker + nginx + Authelia, operations |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | local/systemd/TLS, config reference |
+| [docs/CI-CD.md](docs/CI-CD.md) | daily.sh build/push and edge deployment |
 | [docs/CLIENT.md](docs/CLIENT.md) | every client command and config file |
 | [docs/API.md](docs/API.md) | HTTP + WebSocket API reference |
 | [docs/SECURITY.md](docs/SECURITY.md) | trust boundaries, encryption, hardening |
