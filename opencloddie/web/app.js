@@ -96,23 +96,50 @@ async function api(path, options = {}) {
 }
 
 async function copyText(text) {
+  let ok = false;
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
-    } else {
+      ok = true;
+    }
+  } catch (_) {
+    ok = false;
+  }
+  if (!ok) {
+    try {
       const area = h('textarea', { style: 'position:fixed;left:-9999px;top:0' });
       area.value = text;
       document.body.append(area);
       area.select();
-      document.execCommand('copy');
+      ok = document.execCommand('copy');
       area.remove();
+    } catch (_) {
+      ok = false;
     }
+  }
+  if (ok) {
     toast('Copied to clipboard');
     return true;
-  } catch (err) {
-    toast('Could not copy: ' + err.message, 'error');
-    return false;
   }
+  showCopyFallback(text);
+  return false;
+}
+
+function showCopyFallback(text) {
+  const area = h('textarea', {
+    class: 'input',
+    style: 'width:100%;height:180px;font-family:var(--mono);resize:vertical',
+  });
+  area.value = text;
+  area.readOnly = true;
+  openModal({
+    title: 'Copy manually',
+    body: h('div', {},
+      h('p', { class: 'muted', text: 'Clipboard access is blocked. Select the text below and copy it.' }),
+      area),
+    actions: [{ label: 'Close', class: 'btn-primary' }],
+  });
+  setTimeout(() => { area.focus(); area.select(); }, 50);
 }
 
 function toast(message, kind = 'info') {
@@ -226,6 +253,8 @@ async function boot() {
   $('#booting').hidden = true;
   $('#app').hidden = false;
   state.booted = true;
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Shift+C copy · Ctrl+Shift+V paste';
   setTimeout(() => {
     const entry = state.terminals.get(state.activeId);
     if (entry) fitTerminal(entry);
@@ -336,6 +365,7 @@ function renderTopbar() {
     const active = activeSession();
     if (active) {
       root.append(
+        h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selected terminal text', onclick: copySelection }),
         h('button', { class: 'btn btn-ghost btn-sm', text: 'Copy attach', onclick: () => copyText(`opencloddie attach ${quoteArg(active.name)}`) }),
         h('button', { class: 'btn btn-danger btn-sm', text: 'Kill session', onclick: () => killSession(active) }),
       );
@@ -492,6 +522,7 @@ function ensureTerminal(session) {
     observer: null,
   };
   state.terminals.set(session.id, entry);
+  setupTerminalClipboard(entry);
 
   term.onData((data) => {
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
@@ -519,6 +550,64 @@ function fitTerminal(entry) {
 function sendControl(entry, message) {
   if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
     entry.ws.send(JSON.stringify(message));
+  }
+}
+
+function copySelection() {
+  const entry = state.terminals.get(state.activeId);
+  const selection = entry && entry.term ? entry.term.getSelection() : '';
+  if (!selection) {
+    toast('Select terminal text first, then Copy', 'warn');
+    return;
+  }
+  copyText(selection);
+}
+
+function setupTerminalClipboard(entry) {
+  const term = entry.term;
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true;
+    const key = (event.key || '').toLowerCase();
+    const mod = event.ctrlKey || event.metaKey;
+    if (mod && event.shiftKey && key === 'c') {
+      const selection = term.getSelection();
+      if (selection) {
+        event.preventDefault();
+        copyText(selection);
+      }
+      return false;
+    }
+    if (mod && event.shiftKey && key === 'v') {
+      event.preventDefault();
+      pasteClipboard(term);
+      return false;
+    }
+    // On macOS Cmd+C is copy; Ctrl+C must remain SIGINT.
+    if (event.metaKey && !event.shiftKey && key === 'c') {
+      const selection = term.getSelection();
+      if (selection) {
+        event.preventDefault();
+        copyText(selection);
+        return false;
+      }
+    }
+    return true;
+  });
+  entry.el.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    const selection = term.getSelection();
+    if (selection) copyText(selection);
+    else toast('Select terminal text, then right-click to copy', 'warn');
+  });
+}
+
+async function pasteClipboard(term) {
+  try {
+    if (!navigator.clipboard || !window.isSecureContext) throw new Error('clipboard unavailable');
+    const text = await navigator.clipboard.readText();
+    if (text) term.paste(text);
+  } catch (_) {
+    toast('Clipboard read is blocked; use your browser paste shortcut', 'error');
   }
 }
 

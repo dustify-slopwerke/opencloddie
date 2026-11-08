@@ -269,6 +269,7 @@ pre {
 .statusbar-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .statusbar-item .online { color: var(--accent); }
 .statusbar-item .offline { color: var(--dim); }
+.statusbar-hint { color: var(--dim); }
 
 /* ---------------------------------------------------------------- keys */
 .list { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
@@ -354,6 +355,7 @@ pre {
   .topbar-actions { gap: 4px; }
   .topbar-actions .btn { padding: 5px 8px; font-size: 11.5px; }
   .topbar-actions .btn-ghost { display: none; }
+  .statusbar-hint { display: none; }
   .content { padding: 16px; }
   .tabs { padding: 6px 8px; }
   .empty-card, .overlay-card { padding: 20px; }
