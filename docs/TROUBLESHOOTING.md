@@ -56,7 +56,7 @@ terminal, so the PTY resize never produced `SIGWINCH` inside tmux.  Update the
 client on the host and restart its agent (the tmux session and Claude survive):
 
 ```bash
-curl -fsSL https://oc.dustify.com/install/opencloddie -o ~/.local/bin/opencloddie
+curl -fsSL https://cloddie.example.com/install/opencloddie -o ~/.local/bin/opencloddie
 chmod +x ~/.local/bin/opencloddie
 ps -eo pid,args | grep '[o]pencloddie __agent'
 kill <pid-for-that-session>
@@ -75,7 +75,7 @@ it is less than 120 seconds old; otherwise it copies the visible screen.  This
 requires the current client/agent on that host:
 
 ```bash
-curl -fsSL https://oc.dustify.com/install/opencloddie -o ~/.local/bin/opencloddie
+curl -fsSL https://cloddie.example.com/install/opencloddie -o ~/.local/bin/opencloddie
 chmod +x ~/.local/bin/opencloddie
 ps -eo pid,args | grep '[o]pencloddie __agent'
 kill <pid-for-that-session>

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from . import __version__
 from .auth import ApiIdentity, AuthError, WebIdentity, api_identity, web_identity
 from .config import APP_NAME
 from .crypto import decrypt_secret, encrypt_secret
@@ -46,7 +47,7 @@ from .websocket import OP_BINARY, OP_TEXT, WSClosed, WebSocket, WebSocketError, 
 log = logging.getLogger("opencloddie.http")
 access_log = logging.getLogger("opencloddie.access")
 
-VERSION = "0.1.0"
+VERSION = __version__
 MAX_BODY = 32 * 1024 * 1024
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -74,7 +75,9 @@ class App:
         self.hub = AgentHub(self)
         self.started_at = time.time()
         self.web_root = Path(__file__).resolve().parent / "web"
-        self.client_script = Path(__file__).resolve().parent.parent / "bin" / "opencloddie"
+        package_client = Path(__file__).resolve().parent / "client" / "opencloddie"
+        repo_client = Path(__file__).resolve().parent.parent / "bin" / "opencloddie"
+        self.client_script = package_client if package_client.is_file() else repo_client
         self.models = cfg["gateway"]["models"]
         self.model_ids = model_ids(self.models)
         self.default_model = cfg["gateway"]["default_model"]

@@ -1,6 +1,6 @@
 PY ?= python3
 
-.PHONY: help compile test init run client-install docker-build clean
+.PHONY: help compile test init run client-install docker-build dist release-tag clean
 
 help:
 	@echo "opencloddie targets:"
@@ -10,6 +10,8 @@ help:
 	@echo "  make run             run the local web + API listeners"
 	@echo "  make client-install  install the client (SERVER=https://...)"
 	@echo "  make docker-build    build the deployment image"
+	@echo "  make dist            build the wheel and sdist (needs 'build')"
+	@echo "  make release-tag     run tests and create the v<version> tag"
 
 compile:
 	$(PY) -m py_compile opencloddie/*.py bin/opencloddie bin/opencloddie-server
@@ -29,6 +31,11 @@ client-install:
 docker-build:
 	docker build -f deploy/Dockerfile -t opencloddie:latest .
 
+dist:
+	$(PY) -m build
+
+release-tag:
+	./scripts/release.sh
+
 clean:
-	rm -rf __pycache__ opencloddie/__pycache__ tests/__pycache__
-	find . -name '*.pyc' -delete
+	rm -rf __pycache__ opencloddie/__pycache__ tests/__pycache__ dist build *.egg-info

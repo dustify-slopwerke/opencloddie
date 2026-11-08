@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencloddie"
+dynamic = ["version"]
+description = "Anthropic-compatible gateway and tabbed terminal relay for Claude Code using per-user OpenCode Go keys"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "opencloddie contributors" }]
+keywords = [
+  "claude-code",
+  "anthropic",
+  "opencode",
+  "gateway",
+  "terminal",
+  "tmux",
+  "websocket",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: System :: Systems Administration",
+  "Topic :: Terminals :: Terminal Emulators/X Terminals",
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/opencloddie"
+Documentation = "https://github.com/OWNER/opencloddie/tree/main/docs"
+Changelog = "https://github.com/OWNER/opencloddie/blob/main/CHANGELOG.md"
+Issues = "https://github.com/OWNER/opencloddie/issues"
+Security = "https://github.com/OWNER/opencloddie/security/policy"
+
+[project.scripts]
+opencloddie-server = "opencloddie.server:main"
+
+[project.optional-dependencies]
+dev = ["build>=1.2"]
+
+[tool.setuptools]
+packages = ["opencloddie"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "opencloddie.__version__" }
+
+[tool.setuptools.package-data]
+opencloddie = ["web/*", "web/vendor/*", "client/*"]

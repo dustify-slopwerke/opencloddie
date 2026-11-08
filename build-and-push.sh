@@ -11,6 +11,7 @@
 set -euo pipefail
 
 NAME="${NAME:-$(basename "$PWD")}"
+# The maintainers' registry; set REGISTRY for another registry.
 REGISTRY="${REGISTRY:-r.dustify.com}"
 DOCKERFILE="${DOCKERFILE:-deploy/Dockerfile}"
 IMAGE="$REGISTRY/$NAME"

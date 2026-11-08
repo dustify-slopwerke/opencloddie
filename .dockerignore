@@ -17,3 +17,8 @@ deploy/data
 .idea
 .vscode
 .DS_Store
+
+dist
+build
+*.whl
+*.tar.gz

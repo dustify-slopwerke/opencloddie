@@ -20,7 +20,8 @@ opencloddie/            server package (stdlib only)
   server.py             init/run/user/key CLI, logging, TLS, watchdog
   web/                  index.html, app.js, style.css, vendored xterm
 
-bin/opencloddie         standalone client (duplicated WS/PTY code by design)
+bin/opencloddie         symlink -> opencloddie/client/opencloddie
+  client/opencloddie      standalone client (duplicated WS/PTY code by design)
 bin/opencloddie-server  launcher for the package
 tests/                  unittest suite + fake upstream harness
 deploy/                 Dockerfile, compose, nginx, systemd, deploy docs
@@ -31,7 +32,8 @@ docs/                   architecture, API, client, security, ops
 The client intentionally does not import the server package: it is downloaded
 as a single file and must run with only the standard library.  When changing
 the agent/terminal protocol, update **both** `opencloddie/websocket.py`
-(server) and the embedded client in `bin/opencloddie`, and add an end-to-end
+(server) and the embedded client in `opencloddie/client/opencloddie`
+(`bin/opencloddie` is a symlink), and add an end-to-end
 test.
 
 ## Running tests
@@ -61,10 +63,11 @@ headers/body and can emit JSON or SSE.
 | `test_websocket.py` | RFC accept key, masked/unmasked frames, fragmentation, interleaved ping/pong, close, oversize |
 | `test_gateway.py` | model forcing, header forwarding/auth swap/session mirroring, SSE relay, count_tokens, missing OpenCode key, fallback, x-api-key style, stable affinity id, rate limit, key test |
 | `test_api.py` | web auth/401, static/CSP-ish checks, OpenCode key lifecycle, API-key CRUD + CSRF, default model, proxy secret, system/stats, API auth errors, streaming gateway over HTTP, install endpoints |
-| `test_agent_e2e.py` | real tmux + real client agent + browser terminal WS; input/output round trip; kill propagation |
+| `test_agent_e2e.py` | real tmux + real client agent + browser terminal WS; input/output round trip; resize; tmux-buffer round trip; kill propagation |
 | `test_client.py` | `opencloddie login/config/env/whoami/run/ls/stop` against a live test server with a fake Claude binary |
+| `test_version.py` | package/server/client versions match and use semver |
 
-62 tests.  Each test creates isolated temp configs/databases and ephemeral
+65 tests.  Each test creates isolated temp configs/databases and ephemeral
 ports; no fixed ports, no network, no reliance on the developer's state.
 
 ### Adding a test
@@ -116,7 +119,7 @@ Open `http://127.0.0.1:18787`, click the tab, type.  Stop with
 
 - **Server:** Python 3.12 standard library only.  Do not add a pip dependency
   without a strong reason; the dependency-free property is a feature.
-- **Client:** keep `bin/opencloddie` self-contained.  It may duplicate small
+- **Client:** keep `opencloddie/client/opencloddie` self-contained.  It may duplicate small
   helpers from the server, but not import the package.
 - **Threading:** shared state goes behind a lock (`Database.lock`,
   `AgentConnection.lock`, `Channel._lock`, `Gateway._rate_lock`).  Never block
@@ -162,14 +165,16 @@ Keep CI offline-compatible.  The tests never call the real OpenCode endpoint.
 
 ## Release checklist
 
-- [ ] `make test` passes locally.
+- [ ] `make test` passes locally (65 tests).
 - [ ] `docker build -f deploy/Dockerfile -t opencloddie:test .` succeeds.
-- [ ] Version bumped in `opencloddie/httpd.py`, `opencloddie/server.py`, and
-      `bin/opencloddie` (`VERSION`).
+- [ ] Version bumped in `opencloddie/__init__.py` and the client's `VERSION`;
+      `pyproject.toml` reads it dynamically, and `test_version.py` catches drift.
 - [ ] README and docs updated for any behavior/config change.
+- [ ] `CHANGELOG.md` has the release entry.
 - [ ] Deploy/README commands still match the compose/Dockerfile.
 - [ ] No secrets, tokens, or personal paths in the diff.
-- [ ] Tag and build the image; keep the previous tag for rollback.
+- [ ] Tag `v<version>` and let the release workflow build GHCR + wheel + client;
+      see [docs/RELEASE.md](RELEASE.md).  Keep the previous tag for rollback.
 
 ## Debugging
 

@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import (
     APP_NAME,
     default_config_path,
@@ -24,7 +25,7 @@ from .crypto import encrypt_secret
 from .models import normalize_model
 from .util import ensure_dir, mask_secret
 
-VERSION = "0.1.0"
+VERSION = __version__
 
 
 def _configure_logging(cfg: dict[str, Any]) -> None:

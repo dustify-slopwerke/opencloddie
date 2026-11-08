@@ -1,6 +1,7 @@
 # Client reference
 
-The client is one standalone Python 3.12 file: `bin/opencloddie`.  It is served
+The client is one standalone Python 3.12 file: `opencloddie/client/opencloddie`
+(`bin/opencloddie` is a symlink).  It is served
 by the API at `/install/opencloddie`, so a machine needs only `curl` and
 `python3` to install it (plus tmux and Claude Code to run sessions).
 

@@ -1,5 +1,9 @@
 # Deploying opencloddie
 
+> This reference deployment targets an edge nginx + Authelia stack.  Paths such
+> as `~/compose/edge` are examples; adapt them to your host.  For a local
+> quick-start without Authelia, use the root `compose.yaml`.
+
 opencloddie fits the existing `~/compose/edge` + `~/compose/authelia` layout:
 
 ```

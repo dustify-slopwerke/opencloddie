@@ -1,3 +1,8 @@
+> **Reference deployment.** This page documents the maintainers' daily.sh /
+> edge-nginx pipeline as an example. Registry names, hostnames, and `~/compose`
+> / `~/scripts` paths are placeholders — substitute your own. `build-and-push.sh`
+> defaults to the maintainers' registry; set `REGISTRY=...` to override it.
+
 # CI/CD integration (daily.sh pipeline)
 
 opencloddie plugs into the existing `~/scripts/daily.sh` / `push.sh` / `up.sh`
@@ -17,10 +22,10 @@ The repository carries two markers understood by `daily.sh` and `push.sh`:
 
 `build-and-push.sh`:
 
-1. runs `./scripts/test.sh` (all 62 tests; `SKIP_TESTS=1` to skip),
+1. runs `./scripts/test.sh` (all 65 tests; `SKIP_TESTS=1` to skip),
 2. builds `deploy/Dockerfile` from the repository root,
-3. tags `r.dustify.com/opencloddie:<short-sha>` and
-   `r.dustify.com/opencloddie:latest`,
+3. tags `registry.example.com/opencloddie:<short-sha>` and
+   `registry.example.com/opencloddie:latest`,
 4. pushes both (the daily script has already logged in to the registry).
 
 `DRY_RUN=1 ./build-and-push.sh` builds locally without pushing.
@@ -31,7 +36,7 @@ The daily flow is therefore:
 daily.sh
   ├─ edge: compose up + cert.sh + reload.sh
   ├─ registry: compose up
-  ├─ docker login r.dustify.com
+  ├─ docker login registry.example.com
   ├─ for ~/src/*:
   │    opencloddie -> build-and-push.sh
   │       test -> build -> push :<sha> and :latest
@@ -44,14 +49,14 @@ daily.sh
 The live stack lives in `~/compose/opencloddie/compose.yml` (a separate
 directory, so `daily.sh` picks it up automatically):
 
-- image `r.dustify.com/opencloddie:latest`
+- image `registry.example.com/opencloddie:latest`
 - no published ports; joins the external `edge` network
 - internal web `:8787`, public API `:8788`
 - `opencloddie-data` volume at `/data` (config, SQLite, logs)
 - read-only root filesystem, `cap_drop: ALL`, `no-new-privileges`
 
-DNS: `oc.dustify.com` -> the edge origin.  The existing wildcard certificate
-(`*.dustify.com`) already covers it; no certbot change is needed.
+DNS: `cloddie.example.com` -> the edge origin.  The existing wildcard certificate
+(`*.example.com`) already covers it; no certbot change is needed.
 
 ## Edge routing
 
@@ -77,7 +82,7 @@ docker exec edge-nginx-1 nginx -s reload
 The web UI requires an access-control rule because `default_policy` is `deny`:
 
 ```yaml
-    - domain: oc.dustify.com
+    - domain: cloddie.example.com
       policy: two_factor
       subject:
         - ['group:god']
@@ -101,7 +106,7 @@ docker compose -f ~/compose/authelia/compose.yml restart authelia
 
 First deploy:
 
-1. Ensure DNS for `oc.dustify.com` points at the edge.
+1. Ensure DNS for `cloddie.example.com` points at the edge.
 2. Ensure the Authelia rule is present and Authelia restarted.
 3. Run `~/scripts/daily.sh`, or manually:
    ```bash
@@ -109,7 +114,7 @@ First deploy:
    DRY_RUN=0 ./build-and-push.sh
    docker compose -f ~/compose/opencloddie/compose.yml up -d --pull always
    ```
-4. Open `https://oc.dustify.com/`, sign in through Authelia, add the OpenCode
+4. Open `https://cloddie.example.com/`, sign in through Authelia, add the OpenCode
    key, create an API key, install the client.
 
 Update: push to `main`; the next daily run tests, builds, pushes, and recreates

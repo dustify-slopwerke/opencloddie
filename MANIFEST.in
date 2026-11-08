@@ -1,0 +1,7 @@
+include LICENSE
+include THIRD_PARTY_NOTICES.md
+include CHANGELOG.md
+include README.md
+include bin/opencloddie-server
+recursive-include opencloddie/web *
+recursive-include opencloddie/client *

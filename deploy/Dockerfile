@@ -3,6 +3,15 @@
 # on the clients; this container is the gateway, web UI, and session registry.
 FROM python:3.12-slim
 
+ARG VERSION=0.1.0
+ARG SOURCE_URL="https://github.com/OWNER/opencloddie"
+
+LABEL org.opencontainers.image.title="opencloddie" \
+      org.opencontainers.image.description="Anthropic-compatible gateway and tabbed terminal relay for Claude Code" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH=/app/bin:$PATH \
@@ -12,6 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin opencloddie
 
 WORKDIR /app
+COPY LICENSE THIRD_PARTY_NOTICES.md /app/
 COPY opencloddie /app/opencloddie
 COPY bin /app/bin
 COPY deploy/entrypoint.sh /entrypoint.sh

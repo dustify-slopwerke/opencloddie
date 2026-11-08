@@ -1,5 +1,13 @@
 # opencloddie
 
+[![CI](https://github.com/OWNER/opencloddie/actions/workflows/test.yml/badge.svg)](https://github.com/OWNER/opencloddie/actions/workflows/test.yml)
+[![Release](https://github.com/OWNER/opencloddie/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/opencloddie/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+
+> Replace `OWNER` in the badge URLs and install commands with the GitHub
+> account or organization that hosts the repository.
+
 Run Claude Code on any machine, point it at one gateway, and drive every
 session from a tabbed web UI.
 
@@ -70,6 +78,38 @@ Then copy `deploy/nginx/opencloddie.conf` into the edge nginx and add the
 Authelia access-control rule.  No host ports are published.  `/v1/`, `/agent/`,
 `/client/`, and `/install/` are public (API-key auth); everything else goes
 through Authelia, which injects `Remote-User`.
+
+## Install from a release
+
+Each tagged release publishes a multi-arch container image, a Python wheel and
+sdist, and the standalone client script.
+
+```bash
+# Container (amd64/arm64), loopback-only quick start
+docker run -d --name opencloddie \
+  -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
+  -v opencloddie-data:/data \
+  ghcr.io/OWNER/opencloddie:0.1.0
+
+# Or build the checked-out source
+docker compose up -d --build
+```
+
+`compose.yaml` uses a local build.  Put nginx + Authelia in front for anything
+public; see [deploy/README.md](deploy/README.md).
+
+Wheel (server; the client is downloaded from a running server):
+
+```bash
+python3 -m pip install \
+  https://github.com/OWNER/opencloddie/releases/download/v0.1.0/opencloddie-0.1.0-py3-none-any.whl
+opencloddie-server init
+opencloddie-server run
+```
+
+GHCR packages are private by default; make the package public in its GitHub
+settings before sharing the image.  Release and verification details:
+**[docs/RELEASE.md](docs/RELEASE.md)**.
 
 ## Client
 
@@ -163,7 +203,7 @@ Details and the threat model: **[docs/SECURITY.md](docs/SECURITY.md)**.
 make test          # or ./scripts/test.sh
 ```
 
-62 tests cover crypto, config, DB, model routing, WebSocket framing, gateway
+65 tests cover crypto, config, DB, model routing, WebSocket framing, gateway
 header/stream behavior, the HTTP APIs, CSRF/auth, and two real end-to-end
 flows: client → tmux → agent → server → browser terminal, and the full
 `opencloddie` CLI.  Tests run offline against a fake OpenCode upstream; tmux
@@ -175,9 +215,10 @@ and how to add more.
 ## Repository layout
 
 ```
-bin/opencloddie              standalone client (first-run setup, tmux, agent)
+bin/opencloddie              symlink to the standalone client
 bin/opencloddie-server       server launcher
 opencloddie/
+  client/opencloddie         standalone client (first-run setup, tmux, agent)
   config.py  crypto.py  db.py  auth.py  models.py
   gateway.py                 Anthropic -> OpenCode Go proxy
   websocket.py               stdlib RFC 6455 server/client
@@ -185,8 +226,10 @@ opencloddie/
   httpd.py                   web + API listeners, terminal/agent WebSockets
   server.py                  init/run/admin CLI
   web/                       UI (vanilla JS + vendored xterm.js)
+compose.yaml                 local quick-start stack
+.github/                     CI, release, CodeQL, Dependabot, issue templates
 tests/                       unittest suite + fake upstream harness
-deploy/                      Dockerfile, compose, nginx, Authelia notes
+deploy/                      Dockerfile, compose, nginx, Authelia notes, systemd
 docs/                        architecture, API, client, security, dev, ops
 ```
 
@@ -202,6 +245,7 @@ docs/                        architecture, API, client, security, dev, ops
 | [docs/API.md](docs/API.md) | HTTP + WebSocket API reference |
 | [docs/SECURITY.md](docs/SECURITY.md) | trust boundaries, encryption, hardening |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | tests, CI, release process |
+| [docs/RELEASE.md](docs/RELEASE.md) | versioning, GHCR/wheel releases, rollback |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | symptom → cause → fix |
 
 ## Status
@@ -211,3 +255,23 @@ requirements are Python 3.12 (server and client) and tmux/Claude Code on the
 client.  The API is a streaming pass-through — it does not translate message
 formats, so any model OpenCode Go exposes through its Anthropic endpoint works
 without code changes.
+
+## Contributing
+
+Contributions are welcome.  See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, test requirements, conventions, and pull-request checklist.
+Please read the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Do not open a public issue for a vulnerability.  Use the private reporting
+process in [SECURITY.md](SECURITY.md); the threat model and hardening checklist
+are in [docs/SECURITY.md](docs/SECURITY.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).  The web UI vendors xterm.js under MIT; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+opencloddie is an independent project and is not affiliated with or endorsed by
+Anthropic, OpenCode, or the maintainers of Claude Code, OpenCode Go, or tmux.
