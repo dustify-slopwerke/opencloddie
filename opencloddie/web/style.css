@@ -325,8 +325,10 @@ pre {
 .tile-focus:hover { color: var(--text); background: var(--panel-3); }
 .terminals.tiled .tile-term { flex: 1; min-height: 0; min-width: 0; padding: 0; overflow: hidden; }
 /* FitAddon subtracts .xterm's padding but not its parent's, so keep the tile
-   gutters on .xterm; otherwise the bottom of the last row is clipped. */
-.terminals.tiled .term-wrap .xterm { padding: 4px 8px 6px 6px; }
+   gutters on .xterm; otherwise the bottom of the last row is clipped. No
+   horizontal padding: every pixel goes to terminal columns, and FitAddon
+   already reserves the scrollbar width. */
+.terminals.tiled .term-wrap .xterm { padding: 4px 0 6px 0; }
 .terminals.tiled .term-wrap.is-offline .tile-term { opacity: .25; }
 .tile-offline {
   position: absolute; left: 0; right: 0; bottom: 0; top: 21px;

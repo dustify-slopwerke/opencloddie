@@ -564,12 +564,9 @@ function setLayout(mode, { persist = true } = {}) {
   }
 }
 
-// Choose the column/row split that gives the most usable terminal area. A
-// terminal tolerates height far better than it tolerates being narrow, and a
-// tile needs roughly 380px (~45 columns) to stay readable, so favour columns:
-// score by usable area, penalize empty cells, and prefer cells around a 0.4
-// aspect ratio rather than one giant pane. Fall back to a square-ish grid when
-// the container cannot satisfy the minimum size.
+// Choose the column/row split that gives the most usable terminal area: prefer
+// cells with a ~1.55 aspect ratio, penalize empty cells, and fall back to a
+// square-ish grid when the container cannot satisfy the minimum size.
 function computeGrid(count, width, height) {
   if (count <= 1) return { cols: 1, rows: 1 };
   const gap = 6;
@@ -583,11 +580,11 @@ function computeGrid(count, width, height) {
     const cellW = (usableW - gap * (cols - 1)) / cols;
     const cellH = (usableH - gap * (rows - 1)) / rows;
     const termH = cellH - header;
-    if (cellW < 380 || termH < 100) continue;
+    if (cellW < 200 || termH < 100) continue;
     const empty = cols * rows - count;
     const aspect = cellW / termH;
-    const aspectPenalty = Math.abs(Math.log(aspect / 0.4));
-    const score = Math.log(cellW * termH) - empty * 0.45 - aspectPenalty * 0.5;
+    const aspectPenalty = Math.abs(Math.log(aspect / 1.55));
+    const score = Math.log(cellW * termH) - empty * 0.45 - aspectPenalty * 0.8;
     if (!best || score > best.score) best = { cols, rows, score };
   }
   if (!best) {
