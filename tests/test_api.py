@@ -75,6 +75,22 @@ class ApiTest(unittest.TestCase):
         status, _, _ = self.server.request(self.server.web_port, "GET", "/vendor/../etc/passwd")
         self.assertIn(status, (400, 404))
 
+    def test_web_ui_shell_assets(self):
+        status, _, body = self.server.request(
+            self.server.web_port, "GET", "/", headers=WEB_HEADERS
+        )
+        self.assertEqual(status, 200)
+        text = body.decode()
+        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert"):
+            self.assertIn(needle, text)
+        status, _, js = self.server.request(self.server.web_port, "GET", "/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"function openDrawer", js)
+        self.assertIn(b"function closeDrawer", js)
+        status, _, css = self.server.request(self.server.web_port, "GET", "/style.css")
+        self.assertEqual(status, 200)
+        self.assertIn(b".rail.is-open", css)
+
     # ------------------------------------------------------------ opencode
     def test_opencode_key_lifecycle(self):
         status, _, data = self.web_json("PUT", "/api/opencode-key", {"key": "oc_sk_secret_1234"})

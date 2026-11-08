@@ -893,15 +893,54 @@ function safeStorageSet(key, value) {
   try { localStorage.setItem(key, value); } catch (_) { /* ignore */ }
 }
 
+/* ---------------------------------------------------------------- drawer */
+function openDrawer() {
+  const rail = $('#rail');
+  if (!rail || rail.classList.contains('is-open')) return;
+  rail.inert = false;
+  rail.classList.add('is-open');
+  $('#drawer-backdrop').hidden = false;
+  $('#menu-btn').setAttribute('aria-expanded', 'true');
+  const first = rail.querySelector('.nav-item');
+  if (first) setTimeout(() => {
+    if (rail.classList.contains('is-open')) first.focus();
+  }, 30);
+}
+
+function closeDrawer({ restoreFocus = false } = {}) {
+  const rail = $('#rail');
+  if (!rail || !rail.classList.contains('is-open')) return;
+  const focusInside = rail.contains(document.activeElement);
+  rail.classList.remove('is-open');
+  $('#drawer-backdrop').hidden = true;
+  $('#menu-btn').setAttribute('aria-expanded', 'false');
+  if (restoreFocus || focusInside) $('#menu-btn').focus();
+  rail.inert = true;
+}
+
+function toggleDrawer() {
+  const rail = $('#rail');
+  if (rail && rail.classList.contains('is-open')) closeDrawer({ restoreFocus: true });
+  else openDrawer();
+}
+
 /* ---------------------------------------------------------------- events */
 function bind() {
-  $$('.nav-item').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
+  $$('.nav-item').forEach((button) => button.addEventListener('click', () => {
+    setView(button.dataset.view);
+    closeDrawer();
+  }));
+  $('#menu-btn').addEventListener('click', toggleDrawer);
+  $('#drawer-close').addEventListener('click', () => closeDrawer({ restoreFocus: true }));
+  $('#drawer-backdrop').addEventListener('click', () => closeDrawer({ restoreFocus: true }));
   $('#modal-x').addEventListener('click', closeModal);
   $('#modal-root').addEventListener('click', (event) => {
     if (event.target.dataset.close) closeModal();
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !$('#modal-root').hidden) closeModal();
+    if (event.key !== 'Escape') return;
+    if (!$('#modal-root').hidden) { closeModal(); return; }
+    closeDrawer({ restoreFocus: true });
   });
   $('#new-key').addEventListener('click', createKeyModal);
   $('#empty-new').addEventListener('click', connectModal);
