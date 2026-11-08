@@ -359,6 +359,7 @@ async function loadSessions({ quiet = false } = {}) {
     return;
   }
   const previous = new Map(state.sessions.map((s) => [s.id, s]));
+  const previousActive = state.activeId;
   state.sessions = data.sessions || [];
   for (const session of state.sessions) {
     const entry = state.terminals.get(session.id);
@@ -389,7 +390,9 @@ async function loadSessions({ quiet = false } = {}) {
     $('#status-active').textContent = 'No session selected';
   }
   updateSubtitle();
-  if (!quiet) renderTopbar();
+  // A new session can become active without a tab click (the first session,
+  // or the active one disappearing).  Rebuild the action bar in that case.
+  if (!quiet || previousActive !== state.activeId) renderTopbar();
 }
 
 function activeSession() {
@@ -425,11 +428,12 @@ function renderTabs() {
 function activate(id, { quiet = false } = {}) {
   const session = state.sessions.find((s) => s.id === id);
   if (!session) return;
+  const changed = state.activeId !== id;
   state.activeId = id;
   safeStorageSet('opencloddie.active', id);
   renderTabs();
   updateSubtitle();
-  if (!quiet) renderTopbar();
+  if (!quiet || changed) renderTopbar();
 
   $('#empty').hidden = true;
   for (const [otherId, entry] of state.terminals) {
