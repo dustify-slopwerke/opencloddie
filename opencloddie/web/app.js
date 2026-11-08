@@ -163,22 +163,14 @@ function copyScreen(entry) {
   }
   copyText(screen, {
     manualAction: true,
-    message: 'No fresh tmux selection — copied the visible screen',
+    message: 'No tmux selection — copied the visible screen',
   });
-}
-
-function showScreenFallback(entry) {
-  const screen = getScreenText(entry);
-  if (screen.trim()) showCopyFallback(screen, 'Copy visible screen');
-  else toast('Terminal is empty', 'warn');
 }
 
 function requestTmuxBuffer(entry, mode) {
   if (!entry || entry.disposed) return;
   if (!entry.ws || entry.ws.readyState !== WebSocket.OPEN) {
-    if (mode === 'auto') copyScreen(entry);
-    else if (mode === 'modal') showScreenFallback(entry);
-    else toast('Session is not connected', 'warn');
+    copyScreen(entry);
     return;
   }
   if (entry.pendingBuffer && mode === 'auto') return;
@@ -190,9 +182,7 @@ function requestTmuxBuffer(entry, mode) {
     entry.pendingBuffer = null;
     entry.bufferTimer = null;
     if (!pending) return;
-    if (pending.mode === 'auto') copyScreen(entry);
-    else if (pending.mode === 'modal') showScreenFallback(entry);
-    else toast('Timed out reading the tmux buffer', 'error');
+    copyScreen(entry);
   }, 4000);
 }
 
@@ -206,9 +196,7 @@ function handleTmuxBuffer(entry, message) {
   if (!pending) return;
   const mode = pending.mode;
   if (message.error) {
-    if (mode === 'auto') copyScreen(entry);
-    else if (mode === 'modal') showScreenFallback(entry);
-    else toast(message.error || 'tmux buffer is empty', 'warn');
+    copyScreen(entry);
     return;
   }
   let text = '';
@@ -220,13 +208,7 @@ function handleTmuxBuffer(entry, message) {
     text = '';
   }
   if (!text) {
-    if (mode === 'auto') copyScreen(entry);
-    else if (mode === 'modal') showScreenFallback(entry);
-    else toast('tmux buffer is empty', 'warn');
-    return;
-  }
-  if (mode === 'modal') {
-    showCopyFallback(text, 'Copy tmux buffer');
+    copyScreen(entry);
     return;
   }
   if (mode === 'auto') {
@@ -252,7 +234,7 @@ function showCopyFallback(text, title = 'Copy manually') {
   openModal({
     title,
     body: h('div', {},
-      h('p', { class: 'muted', text: 'Clipboard access is blocked. Select the text below and copy it, or download it.' }),
+      h('p', { class: 'muted', text: 'Select the text below and copy it, or download it.' }),
       area),
     actions: [
       {
@@ -740,10 +722,10 @@ function setupTerminalClipboard(entry) {
     event.preventDefault();
     const selection = currentSelection();
     if (selection) {
-      showCopyFallback(selection, 'Copy terminal text');
+      copyText(selection, { manualAction: true });
       return;
     }
-    requestTmuxBuffer(entry, 'modal');
+    requestTmuxBuffer(entry, 'manual');
   });
 }
 
