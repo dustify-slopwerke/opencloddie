@@ -921,6 +921,23 @@ function bind() {
     if (which === 'install') copyText((state.me.install || {}).command || '');
     if (which === 'login') copyText((state.me.install || {}).login || '');
   });
+  $$('[data-copy-command]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const which = button.dataset.copyCommand;
+      const source = which === 'login' ? $('#login-command') : $('#install-command');
+      const text = (source ? source.textContent : '').trim();
+      if (!text || text === '—') {
+        toast('The command is still loading', 'warn');
+        return;
+      }
+      const original = button.textContent;
+      const ok = await copyText(text);
+      if (ok) {
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = original; }, 1400);
+      }
+    });
+  });
   window.addEventListener('resize', () => {
     const entry = state.terminals.get(state.activeId);
     if (entry) fitTerminal(entry);
