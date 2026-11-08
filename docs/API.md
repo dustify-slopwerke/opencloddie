@@ -16,7 +16,7 @@ not safe to expose: it trusts the identity header.
 ### `GET /healthz`
 
 ```json
-{"ok": true, "version": "0.1.0", "mode": "api", "uptime": 42}
+{"ok": true, "version": "0.2.0", "mode": "api", "uptime": 42}
 ```
 
 No auth.
@@ -150,7 +150,7 @@ Used by `opencloddie __agent`.  Auth via the same API key (header or query).
 Handshake, then a JSON hello:
 
 ```json
-{"t":"hello","agent_id":"a-...","version":"0.1.0","hostname":"laptop",
+{"t":"hello","agent_id":"a-...","version":"0.2.0","hostname":"laptop",
  "platform":"linux","session":{"id":"s_...","name":"work","cwd":"/home/alice/src/api"}}
 ```
 
@@ -300,7 +300,7 @@ Terminal WebSocket described above.
 
 ### `GET /healthz`
 
-`{"ok":true,"version":"0.1.0","mode":"web"}` (no auth).
+`{"ok":true,"version":"0.2.0","mode":"web"}` (no auth).
 
 ## Static assets
 
@@ -328,7 +328,7 @@ is same-origin only.  This also underpins CSRF defence for the web listener.
 
 ## Versioning
 
-`v0.1.0`.  The public API mirrors the Anthropic Messages API and tracks the
+`v0.2.0`.  The public API mirrors the Anthropic Messages API and tracks the
 upstream's behavior; additive response headers and fields are expected.  The
 agent/terminal WebSocket protocols are internal and may change between minor
 versions; client and server should be upgraded together.

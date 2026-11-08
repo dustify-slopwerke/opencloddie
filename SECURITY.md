@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest `0.1.x` release.  Older releases
+Security fixes are provided for the latest `0.2.x` release.  Older releases
 may be asked to upgrade before a fix is backported.
 
 ## Reporting a vulnerability

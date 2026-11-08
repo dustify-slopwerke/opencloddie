@@ -1,6 +1,8 @@
 import json
 import unittest
 
+import opencloddie
+
 from tests.harness import FakeUpstream, TestServer, WEB_HEADERS
 
 CSRF = {"X-OpenCloddie-Client": "web"}
@@ -193,7 +195,7 @@ class ApiTest(unittest.TestCase):
     def test_system_and_stats(self):
         status, _, system = self.web_json("GET", "/api/system")
         self.assertEqual(status, 200)
-        self.assertEqual(system["version"], "0.1.0")
+        self.assertEqual(system["version"], opencloddie.__version__)
         self.assertIn("gateway", system)
         status, _, stats = self.web_json("GET", "/api/stats")
         self.assertEqual(status, 200)

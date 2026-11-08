@@ -142,7 +142,7 @@ Open `http://127.0.0.1:18787`, click the tab, type.  Stop with
 
 ## Database changes
 
-There is no migration framework in v0.1.  `Database._init_schema` runs
+There is no migration framework in v0.2.  `Database._init_schema` runs
 `CREATE TABLE IF NOT EXISTS` and stores `schema_version=1` in `meta`.  If you
 add a column:
 

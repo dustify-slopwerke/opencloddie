@@ -186,7 +186,7 @@ its tmux session persists.
   counts.
 - SQLite `PRAGMA integrity_check` in periodic maintenance.
 
-There are no metrics endpoints in v0.1.  Parse the log or add a metrics
+There are no metrics endpoints in v0.2.  Parse the log or add a metrics
 exporter if needed.
 
 ## Scaling
@@ -203,5 +203,5 @@ Single node only: the agent hub is in-memory.  Options if you outgrow it:
 ## Rollback
 
 Keep the previous image/tag and a copy of the database.  The schema is additive
-in v0.1; a rollback needs a matching older binary and a database backup taken
+in v0.2; a rollback needs a matching older binary and a database backup taken
 before the upgrade.

@@ -10,7 +10,7 @@
 - Keep the server small enough to audit: Python 3.12 standard library only, no
   build step, no database server, one container.
 
-Non-goals for v0.1: multi-node fan-out, server-hosted workspaces, collaborative
+Non-goals for v0.2: multi-node fan-out, server-hosted workspaces, collaborative
 multi-cursor editing, request translation between protocols.
 
 ## Process model

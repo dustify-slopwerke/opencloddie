@@ -164,7 +164,7 @@ and use `web.dev_user` deliberately.
 - Agent heartbeat timeout 120s; stale agents are closed by a watchdog.
 - SQLite WAL + busy timeout 30s.
 
-There is no per-user session quota in v0.1; add one at the API layer if you
+There is no per-user session quota in v0.2; add one at the API layer if you
 expose this to an untrusted multi-tenant audience.  The single-process design
 also means the rate limiter is per instance, not distributed.
 

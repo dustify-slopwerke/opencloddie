@@ -6,6 +6,32 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-08
+
+### Added
+
+- Single/Tile layout switch in the web UI, persisted across reloads.  Tile
+  mode shows every session at once with a per-tile header (live name, model,
+  and status), an offline overlay, and a focus-to-single button; the grid is
+  recomputed from the container size on layout and resize, and phones stay in
+  single mode.
+
+### Changed
+
+- Tiled mode keeps a 2x2 grid and gives tile width back to terminal columns;
+  wide windows still gain a column when the cells stay readable.
+- Updated GitHub Actions dependencies (`checkout` v7, `login-action` v4,
+  `metadata-action` v6, `build-push-action` v7, `action-gh-release` v3).
+
+### Fixed
+
+- The terminal scrollbar gutter is stable and does not paint over the last
+  column; scrollbar arrow buttons are hidden and the last tile row is no
+  longer clipped.
+- Dropped the always-empty terminal scrollbar (`scrollback: 0`); tmux copy
+  mode (`Ctrl-b [`) remains the history path and the width returns to the
+  terminal.
+
 ## [0.1.0] - 2026-11-08
 
 First public release.
@@ -41,5 +67,6 @@ First public release.
 - Clipboard copy works from xterm selections, the visible screen, and the tmux
   paste buffer.
 
-[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.1.0
