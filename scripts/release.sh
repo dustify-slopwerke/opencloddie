@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 
 version="$(python3 -c 'import opencloddie; print(opencloddie.__version__)')"
 tag="v${version}"
+REMOTE="${REMOTE:-origin}"
 
 if [[ -n "$(git status --porcelain)" ]]; then
     echo "error: working tree is not clean; commit or stash changes first" >&2
@@ -33,8 +34,8 @@ git tag -a "$tag" -m "opencloddie ${version}"
 echo "created ${tag}"
 
 if [[ "${1:-}" == "--push" ]]; then
-    git push origin "$tag"
-    echo "pushed ${tag}; the GitHub release workflow will build GHCR + wheel + client"
+    git push "$REMOTE" "$tag"
+    echo "pushed ${tag} to ${REMOTE}; the GitHub release workflow will build GHCR + wheel + client"
 else
-    echo "push it with: git push origin ${tag}"
+    echo "push it with: git push ${REMOTE} ${tag}"
 fi

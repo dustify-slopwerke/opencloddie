@@ -41,7 +41,8 @@ Use the helper after the checklist:
 
 ```bash
 ./scripts/release.sh          # tests + local annotated tag
-./scripts/release.sh --push   # also push the tag (triggers the release workflow)
+./scripts/release.sh --push   # push the tag to origin (triggers the release workflow)
+REMOTE=github ./scripts/release.sh --push   # or target the GitHub remote
 ```
 
 ```bash
