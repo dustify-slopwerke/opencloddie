@@ -41,5 +41,5 @@ First public release.
 - Clipboard copy works from xterm selections, the visible screen, and the tmux
   paste buffer.
 
-[Unreleased]: https://github.com/OWNER/opencloddie/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/opencloddie/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.1.0

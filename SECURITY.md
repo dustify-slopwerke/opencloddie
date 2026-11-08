@@ -11,7 +11,7 @@ may be asked to upgrade before a fix is backported.
 
 Use GitHub's private vulnerability reporting:
 
-<https://github.com/OWNER/opencloddie/security/advisories/new>
+<https://github.com/dustify-slopwerke/opencloddie/security/advisories/new>
 
 Please include:
 

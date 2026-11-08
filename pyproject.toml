@@ -35,11 +35,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/opencloddie"
-Documentation = "https://github.com/OWNER/opencloddie/tree/main/docs"
-Changelog = "https://github.com/OWNER/opencloddie/blob/main/CHANGELOG.md"
-Issues = "https://github.com/OWNER/opencloddie/issues"
-Security = "https://github.com/OWNER/opencloddie/security/policy"
+Homepage = "https://github.com/dustify-slopwerke/opencloddie"
+Documentation = "https://github.com/dustify-slopwerke/opencloddie/tree/main/docs"
+Changelog = "https://github.com/dustify-slopwerke/opencloddie/blob/main/CHANGELOG.md"
+Issues = "https://github.com/dustify-slopwerke/opencloddie/issues"
+Security = "https://github.com/dustify-slopwerke/opencloddie/security/policy"
 
 [project.scripts]
 opencloddie-server = "opencloddie.server:main"

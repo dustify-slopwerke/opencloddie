@@ -1,12 +1,9 @@
 # opencloddie
 
-[![CI](https://github.com/OWNER/opencloddie/actions/workflows/test.yml/badge.svg)](https://github.com/OWNER/opencloddie/actions/workflows/test.yml)
-[![Release](https://github.com/OWNER/opencloddie/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/opencloddie/actions/workflows/release.yml)
+[![CI](https://github.com/dustify-slopwerke/opencloddie/actions/workflows/test.yml/badge.svg)](https://github.com/dustify-slopwerke/opencloddie/actions/workflows/test.yml)
+[![Release](https://github.com/dustify-slopwerke/opencloddie/actions/workflows/release.yml/badge.svg)](https://github.com/dustify-slopwerke/opencloddie/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
-
-> Replace `OWNER` in the badge URLs and install commands with the GitHub
-> account or organization that hosts the repository.
 
 Run Claude Code on any machine, point it at one gateway, and drive every
 session from a tabbed web UI.
@@ -89,7 +86,7 @@ sdist, and the standalone client script.
 docker run -d --name opencloddie \
   -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
   -v opencloddie-data:/data \
-  ghcr.io/OWNER/opencloddie:0.1.0
+  ghcr.io/dustify-slopwerke/opencloddie:0.1.0
 
 # Or build the checked-out source
 docker compose up -d --build
@@ -102,7 +99,7 @@ Wheel (server; the client is downloaded from a running server):
 
 ```bash
 python3 -m pip install \
-  https://github.com/OWNER/opencloddie/releases/download/v0.1.0/opencloddie-0.1.0-py3-none-any.whl
+  https://github.com/dustify-slopwerke/opencloddie/releases/download/v0.1.0/opencloddie-0.1.0-py3-none-any.whl
 opencloddie-server init
 opencloddie-server run
 ```

@@ -4,7 +4,7 @@
 FROM python:3.12-slim
 
 ARG VERSION=0.1.0
-ARG SOURCE_URL="https://github.com/OWNER/opencloddie"
+ARG SOURCE_URL="https://github.com/dustify-slopwerke/opencloddie"
 
 LABEL org.opencontainers.image.title="opencloddie" \
       org.opencontainers.image.description="Anthropic-compatible gateway and tabbed terminal relay for Claude Code" \
