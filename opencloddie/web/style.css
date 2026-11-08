@@ -254,8 +254,28 @@ pre {
 .term-wrap { position: absolute; inset: 0; padding: 10px 12px 12px; display: flex; flex-direction: column; }
 .tile-term { flex: 1; min-height: 0; position: relative; }
 .tile-head { display: none; }
-.term-wrap .xterm { height: 100%; }
-.term-wrap .xterm-viewport { scrollbar-width: thin; }
+.term-wrap .xterm {
+  height: 100%;
+  max-width: 100%;
+  padding-right: 2px; /* keep glyphs clear of the scrollbar edge */
+  overflow: hidden;
+}
+.term-wrap .xterm-viewport {
+  /* A stable, measurable scrollbar avoids overlay scrollbars painting over
+     the last terminal column (FitAddon subtracts this width). */
+  scrollbar-width: auto;
+  scrollbar-color: #2d3948 transparent;
+  scrollbar-gutter: stable;
+}
+.term-wrap .xterm-viewport::-webkit-scrollbar { width: 12px; }
+.term-wrap .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+.term-wrap .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #2d3948;
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-clip: content-box;
+}
+.term-wrap .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #3b4a5c; background-clip: content-box; }
 .term-wrap.hidden { display: none; }
 
 /* Tiled session layout */
@@ -266,11 +286,13 @@ pre {
   gap: 6px;
   padding: 6px;
   background: #07090c;
+  overflow: hidden;
 }
 .terminals.tiled .term-wrap {
   position: relative; inset: auto; padding: 0; overflow: hidden;
   border: 1px solid var(--border-soft); border-radius: 8px;
   background: #07090c; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
 }
 .terminals.tiled .term-wrap.is-active {
   border-color: rgba(126,231,135,.42);
@@ -296,7 +318,7 @@ pre {
   font-size: 14px; line-height: 1; display: grid; place-items: center;
 }
 .tile-focus:hover { color: var(--text); background: var(--panel-3); }
-.terminals.tiled .tile-term { flex: 1; min-height: 0; padding: 4px 6px 6px; }
+.terminals.tiled .tile-term { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px 6px; overflow: hidden; }
 .terminals.tiled .term-wrap.is-offline .tile-term { opacity: .25; }
 .tile-offline {
   position: absolute; left: 0; right: 0; bottom: 0; top: 28px;
