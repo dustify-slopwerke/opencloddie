@@ -64,6 +64,55 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+// Touch devices pop the on-screen keyboard whenever the xterm textarea is
+// focused, so session activation must not focus the terminal there.  Tapping
+// the terminal still focuses it through xterm's own click handling.
+function isCoarsePointer() {
+  return Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+}
+
+function focusTerminal(entry) {
+  if (!entry || isCoarsePointer()) return;
+  entry.term.focus();
+}
+
+let viewportFrame = null;
+let viewportSize = '';
+
+// Keep the app sized to the *visual* viewport.  Without this the on-screen
+// keyboard covers the bottom of the terminal (Android) or iOS pans the page
+// and the cursor line ends up under the keyboard.  The transform compensates
+// for iOS panning the visual viewport instead of resizing it.
+function syncViewportHeight() {
+  const viewport = window.visualViewport;
+  const height = viewport ? viewport.height : window.innerHeight;
+  const width = viewport ? viewport.width : window.innerWidth;
+  if (height > 0) {
+    document.documentElement.style.setProperty('--app-height', `${Math.round(height)}px`);
+  }
+  const app = $('#app');
+  if (app) {
+    const offset = viewport ? Math.round(viewport.offsetTop || 0) : 0;
+    app.style.transform = offset ? `translateY(${offset}px)` : '';
+  }
+  // visualViewport scroll fires continuously while iOS pans; only refit the
+  // terminals when the visible area actually changed size.
+  const size = `${Math.round(width)}x${Math.round(height)}`;
+  if (size === viewportSize) return;
+  viewportSize = size;
+  if (viewportFrame) cancelAnimationFrame(viewportFrame);
+  viewportFrame = requestAnimationFrame(() => {
+    viewportFrame = null;
+    if (!state.booted) return;
+    if (state.layout === 'tile') {
+      layoutTiles();
+      return;
+    }
+    const entry = state.terminals.get(state.activeId);
+    if (entry) fitTerminal(entry);
+  });
+}
+
 function quoteArg(value) {
   if (/^[A-Za-z0-9._\/:-]+$/.test(value)) return value;
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
@@ -385,6 +434,7 @@ async function boot() {
   $('#booting').hidden = true;
   $('#app').hidden = false;
   state.booted = true;
+  syncViewportHeight();
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Insert copy · Shift+Insert paste';
   setTimeout(() => {
@@ -494,7 +544,7 @@ function setView(view) {
       requestAnimationFrame(() => layoutTiles());
     } else {
       const entry = state.terminals.get(state.activeId);
-      if (entry) setTimeout(() => { fitTerminal(entry); entry.term.focus(); }, 30);
+      if (entry) setTimeout(() => { fitTerminal(entry); focusTerminal(entry); }, 30);
     }
   }
 }
@@ -754,7 +804,7 @@ function activate(id, { quiet = false } = {}) {
     updateTilesActive();
     requestAnimationFrame(() => {
       fitTerminal(entry);
-      if (session.online) entry.term.focus();
+      if (session.online) focusTerminal(entry);
     });
     $('#status-active').textContent = session.online
       ? `${session.name} · ${session.hostname || 'host'} · ${session.cwd || '—'} · ${session.model || ''}`
@@ -780,7 +830,7 @@ function activate(id, { quiet = false } = {}) {
   const entry = ensureTerminal(session);
   if (!entry.ws && !entry.retryTimer && session.online) connectTerminal(entry, session);
   entry.el.classList.remove('hidden');
-  requestAnimationFrame(() => { fitTerminal(entry); entry.term.focus(); });
+  requestAnimationFrame(() => { fitTerminal(entry); focusTerminal(entry); });
   $('#status-active').textContent = `${session.name} · ${session.hostname || 'host'} · ${session.cwd || '—'} · ${session.model || ''}`;
 }
 
@@ -843,6 +893,7 @@ function ensureTerminal(session) {
     selection: '',
     pendingBuffer: null,
     bufferTimer: null,
+    webglTried: false,
   };
   state.terminals.set(session.id, entry);
   setupTerminalClipboard(entry);
@@ -888,8 +939,32 @@ function ensureTerminal(session) {
 function fitTerminal(entry) {
   try {
     entry.fit.fit();
+    ensureRenderer(entry);
     sendControl(entry, { t: 'resize', cols: entry.term.cols, rows: entry.term.rows });
   } catch (_) { /* hidden or zero-sized */ }
+}
+
+// xterm 5.5 ships only its DOM renderer; the WebGL addon is the big win when
+// several tiles repaint at once.  Load it lazily once the terminal has real
+// dimensions, and fall back to the DOM renderer when WebGL2 is unavailable or
+// the GPU evicts the context.
+function ensureRenderer(entry) {
+  if (entry.webglTried) return;
+  const namespace = window.WebglAddon;
+  if (!namespace || !namespace.WebglAddon) return;
+  if (!entry.term.cols || !entry.term.rows) return;
+  if (entry.el.classList.contains('hidden')) return;
+  entry.webglTried = true;
+  let addon = null;
+  try {
+    addon = new namespace.WebglAddon();
+    addon.onContextLoss(() => {
+      try { addon.dispose(); } catch (_) { /* ignore */ }
+    });
+    entry.term.loadAddon(addon);
+  } catch (_) {
+    try { if (addon) addon.dispose(); } catch (_) { /* ignore */ }
+  }
 }
 
 function sendControl(entry, message) {
@@ -1423,7 +1498,20 @@ function bind() {
     clearTimeout(tileResizeTimer);
     tileResizeTimer = setTimeout(() => layoutTiles(), 80);
   }).observe($('#terminals'));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncViewportHeight);
+    window.visualViewport.addEventListener('scroll', syncViewportHeight);
+  }
+  window.addEventListener('orientationchange', syncViewportHeight);
+  document.addEventListener('focusin', (event) => {
+    if (!isCoarsePointer()) return;
+    if (!event.target || !event.target.closest || !event.target.closest('.xterm')) return;
+    // The on-screen keyboard animates in after focus; re-measure once it has
+    // settled so the terminal refits above it.
+    setTimeout(syncViewportHeight, 250);
+  });
   window.addEventListener('resize', () => {
+    syncViewportHeight();
     if (window.matchMedia('(max-width: 520px)').matches && state.layout === 'tile') {
       setLayout('single', { persist: false });
     }

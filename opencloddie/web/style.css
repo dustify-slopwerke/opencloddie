@@ -74,7 +74,9 @@ pre {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  /* --app-height is kept in sync with visualViewport so the on-screen
+     keyboard shrinks the layout instead of covering the terminal. */
+  height: var(--app-height, 100dvh);
 }
 .drawer-backdrop {
   position: fixed; inset: 0; z-index: 55;

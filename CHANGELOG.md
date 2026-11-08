@@ -6,6 +6,19 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+### Added
+
+- WebGL renderer for the browser terminal (`@xterm/addon-webgl` 0.18.0), with
+  automatic fallback to xterm's DOM renderer when WebGL2 is unavailable or the
+  GPU context is lost.
+
+### Fixed
+
+- Mobile: activating a session no longer focuses the terminal, so the
+  on-screen keyboard opens only when the terminal is tapped.
+- Mobile: the app now follows `visualViewport`, so the keyboard shrinks the
+  layout above it instead of covering the terminal and cursor.
+
 ## [0.2.0] - 2026-11-08
 
 ### Added
