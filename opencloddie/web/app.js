@@ -95,7 +95,7 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function copyText(text) {
+async function copyText(text, { manualAction = false } = {}) {
   let ok = false;
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -118,14 +118,18 @@ async function copyText(text) {
     }
   }
   if (ok) {
-    toast('Copied to clipboard');
+    toast(
+      'Copied to clipboard',
+      'info',
+      manualAction ? { label: 'Show text', onClick: () => showCopyFallback(text) } : null,
+    );
     return true;
   }
   showCopyFallback(text);
   return false;
 }
 
-function showCopyFallback(text) {
+function showCopyFallback(text, title = 'Copy manually') {
   const area = h('textarea', {
     class: 'input',
     style: 'width:100%;height:180px;font-family:var(--mono);resize:vertical',
@@ -133,24 +137,52 @@ function showCopyFallback(text) {
   area.value = text;
   area.readOnly = true;
   openModal({
-    title: 'Copy manually',
+    title,
     body: h('div', {},
-      h('p', { class: 'muted', text: 'Clipboard access is blocked. Select the text below and copy it.' }),
+      h('p', { class: 'muted', text: 'Clipboard access is blocked. Select the text below and copy it, or download it.' }),
       area),
-    actions: [{ label: 'Close', class: 'btn-primary' }],
+    actions: [
+      {
+        label: 'Download',
+        class: 'btn',
+        onClick: () => {
+          const blob = new Blob([text], { type: 'text/plain' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = 'opencloddie-copy.txt';
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        },
+      },
+      { label: 'Close', class: 'btn-primary' },
+    ],
   });
   setTimeout(() => { area.focus(); area.select(); }, 50);
 }
 
-function toast(message, kind = 'info') {
-  const node = h('div', { class: `toast ${kind === 'info' ? '' : kind}`.trim(), text: message });
+function toast(message, kind = 'info', action = null) {
+  const node = h('div', { class: `toast ${kind === 'info' ? '' : kind}`.trim() });
+  if (action) {
+    node.style.display = 'flex';
+    node.style.alignItems = 'center';
+    node.style.gap = '10px';
+  }
+  node.append(h('span', { text: message }));
+  if (action) {
+    node.append(h('button', {
+      class: 'btn btn-sm',
+      text: action.label,
+      onclick: () => { node.remove(); action.onClick(); },
+    }));
+  }
   $('#toasts').append(node);
+  const ttl = action ? 9000 : (kind === 'error' ? 6000 : 3200);
   setTimeout(() => {
     node.style.opacity = '0';
     node.style.transform = 'translateY(6px)';
     node.style.transition = 'opacity .2s, transform .2s';
     setTimeout(() => node.remove(), 220);
-  }, kind === 'error' ? 6000 : 3200);
+  }, ttl);
 }
 
 function fmtAge(iso) {
@@ -254,7 +286,7 @@ async function boot() {
   $('#app').hidden = false;
   state.booted = true;
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Shift+C copy · Ctrl+Shift+V paste';
+  $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Insert copy · Shift+Insert paste';
   setTimeout(() => {
     const entry = state.terminals.get(state.activeId);
     if (entry) fitTerminal(entry);
@@ -520,11 +552,13 @@ function ensureTerminal(session) {
     retryTimer: null,
     generation: 0,
     observer: null,
+    selection: '',
   };
   state.terminals.set(session.id, entry);
   setupTerminalClipboard(entry);
 
   term.onData((data) => {
+    entry.selection = '';
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
       entry.ws.send(new TextEncoder().encode(data));
     }
@@ -555,39 +589,44 @@ function sendControl(entry, message) {
 
 function copySelection() {
   const entry = state.terminals.get(state.activeId);
-  const selection = entry && entry.term ? entry.term.getSelection() : '';
+  const selection = entry ? (entry.term.getSelection() || entry.selection || '') : '';
   if (!selection) {
-    toast('Select terminal text first, then Copy', 'warn');
+    toast('Drag to select terminal text first, then Copy', 'warn');
     return;
   }
-  copyText(selection);
+  copyText(selection, { manualAction: true });
 }
 
 function setupTerminalClipboard(entry) {
   const term = entry.term;
+  const currentSelection = () => term.getSelection() || entry.selection || '';
+  term.onSelectionChange(() => {
+    const selection = term.getSelection();
+    if (selection) entry.selection = selection;
+  });
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== 'keydown') return true;
     const key = (event.key || '').toLowerCase();
-    const mod = event.ctrlKey || event.metaKey;
-    if (mod && event.shiftKey && key === 'c') {
-      const selection = term.getSelection();
+    if (event.ctrlKey && !event.shiftKey && key === 'insert') {
+      const selection = currentSelection();
       if (selection) {
         event.preventDefault();
-        copyText(selection);
+        copyText(selection, { manualAction: true });
       }
       return false;
     }
-    if (mod && event.shiftKey && key === 'v') {
+    if (event.shiftKey && !event.ctrlKey && !event.metaKey && key === 'insert') {
       event.preventDefault();
       pasteClipboard(term);
       return false;
     }
-    // On macOS Cmd+C is copy; Ctrl+C must remain SIGINT.
+    // macOS: Cmd+C is copy; Ctrl+C must remain SIGINT.  Ctrl+Shift+C is
+    // reserved by Chrome/Edge for DevTools, so it cannot be used.
     if (event.metaKey && !event.shiftKey && key === 'c') {
-      const selection = term.getSelection();
+      const selection = currentSelection();
       if (selection) {
         event.preventDefault();
-        copyText(selection);
+        copyText(selection, { manualAction: true });
         return false;
       }
     }
@@ -595,9 +634,9 @@ function setupTerminalClipboard(entry) {
   });
   entry.el.addEventListener('contextmenu', (event) => {
     event.preventDefault();
-    const selection = term.getSelection();
-    if (selection) copyText(selection);
-    else toast('Select terminal text, then right-click to copy', 'warn');
+    const selection = currentSelection();
+    if (selection) showCopyFallback(selection, 'Copy terminal text');
+    else toast('Drag to select terminal text first', 'warn');
   });
 }
 
