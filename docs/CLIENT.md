@@ -77,6 +77,29 @@ Behaviour:
 5. Waits up to 10s for the server to mark the session online.
 6. Attaches unless stdout/stdin is not a TTY or `--no-attach` is given.
 
+### Re-attaching vs resuming
+
+- **Same folder, same name, tmux alive** — the default name is the folder
+  basename.  `opencloddie` reuses the local mapping, sees the tmux session is
+  running, restarts the agent if needed, and attaches.  It does not create a
+  duplicate session.
+- **Named session** — if you started with `--name work`, plain `opencloddie`
+  in that folder uses the folder-derived name instead.  Re-attach with
+  `opencloddie attach work` (or `opencloddie --name work`).
+- **tmux gone (reboot, killed, stopped)** — the opencloddie session id is
+  reused, so the web session is recreated, but Claude starts a **fresh**
+  conversation.  To resume Claude's most recent conversation in that folder:
+  `opencloddie -- --continue`.  To resume a specific one:
+  `opencloddie --name NAME -- --resume <session-id>`.  Extra Claude arguments
+  only take effect when the tmux session is created.
+- **Claude exited, tmux at the restart prompt** — attaching shows
+  `[claude exited - press Enter to restart]`; Enter starts a fresh
+  conversation.  To resume instead, stop and recreate with `--continue`.
+- Claude Code's conversation history is per working directory, not per
+  opencloddie session name.  If you run several named opencloddie sessions in
+  one folder, `--continue` resumes the most recent Claude conversation in that
+  folder, which may not be the named session you expected.
+
 `Ctrl-b d` detaches.  The tmux session and agent remain; `opencloddie attach`
 returns.  Closing the terminal window without detaching also leaves tmux
 running (the client process exits, tmux does not).
