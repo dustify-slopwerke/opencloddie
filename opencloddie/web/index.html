@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>opencloddie</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="booting" class="booting">
+    <div class="spinner" aria-hidden="true"></div>
+    <span>connecting…</span>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <aside class="rail">
+      <a class="brand" href="/" aria-label="opencloddie home">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+          <rect x="2.5" y="4" width="19" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M7 9.5l3 2.5-3 2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M12.5 15h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+        <span>opencloddie</span>
+      </a>
+
+      <nav class="nav" aria-label="Main">
+        <button class="nav-item is-active" data-view="sessions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 2.5L7 14"/><path d="M12.5 14H17"/></svg>
+          <span>Sessions</span>
+        </button>
+        <button class="nav-item" data-view="keys">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="4.5"/><path d="M13 12h8M18 12v3M21 12v2"/></svg>
+          <span>API keys</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M18 6l-1.6 1.6M7.6 16.4L6 18"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="rail-foot">
+        <div class="user" id="rail-user">
+          <div class="avatar" id="avatar">?</div>
+          <div class="user-meta">
+            <div class="user-name" id="user-name">—</div>
+            <div class="user-sub" id="user-sub">signed in</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1 id="view-title">Sessions</h1>
+          <span id="view-subtitle" class="muted"></span>
+        </div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+
+      <section class="view" id="view-sessions">
+        <div class="tabs" id="tabs" role="tablist"></div>
+        <div class="terminal-area">
+          <div id="terminals" class="terminals"></div>
+          <div class="empty" id="empty">
+            <div class="empty-card">
+              <div class="empty-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="34" height="34"><rect x="3" y="4" width="18" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 9l3 2.5L7 14M12.5 14H17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <h2>No sessions connected</h2>
+              <p>Run <code>opencloddie</code> on a machine with Claude Code. Its terminal ships here automatically and stays alive when you detach.</p>
+              <ol class="steps">
+                <li><span>Install</span><code data-copy="install">—</code></li>
+                <li><span>Sign in</span><code data-copy="login">—</code></li>
+                <li><span>Start</span><code>opencloddie</code></li>
+              </ol>
+              <div class="empty-actions">
+                <button class="btn btn-primary" id="empty-new">Connect a session</button>
+                <button class="btn" id="empty-refresh">Refresh</button>
+              </div>
+            </div>
+          </div>
+          <div class="session-overlay" id="session-overlay" hidden>
+            <div class="overlay-card">
+              <h2 id="overlay-title">Session offline</h2>
+              <p id="overlay-text">Start it again from the machine that hosts it.</p>
+              <div class="overlay-actions">
+                <button class="btn" id="overlay-reconnect">Reconnect</button>
+                <button class="btn btn-danger" id="overlay-kill">Remove session</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <footer class="statusbar">
+          <span class="statusbar-item" id="status-active">No session selected</span>
+          <span class="statusbar-spacer"></span>
+          <span class="statusbar-item" id="status-server"></span>
+        </footer>
+      </section>
+
+      <section class="view" id="view-keys" hidden>
+        <div class="content">
+          <div class="panel-head">
+            <div>
+              <h2>API keys</h2>
+              <p class="muted">Claude Code authenticates to <code>/v1/messages</code> with these keys. Each key pins the model the gateway uses.</p>
+            </div>
+            <button class="btn btn-primary" id="new-key">Create key</button>
+          </div>
+          <div id="keys-list" class="list"></div>
+          <div class="callout" id="keys-callout" hidden>
+            <strong>No keys yet.</strong> Create one, choose a model, then run
+            <code>opencloddie login --api-key …</code>.
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="view-settings" hidden>
+        <div class="content two-col">
+          <div class="stack">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>OpenCode key</h2>
+                  <p class="muted">Your gateway requests use this key. It is encrypted at rest and never shown again.</p>
+                </div>
+                <span class="badge" id="opencode-badge">not set</span>
+              </div>
+              <div class="field-row">
+                <input type="password" id="opencode-input" class="input" placeholder="oc_sk_…" autocomplete="off" spellcheck="false">
+                <button class="btn btn-primary" id="opencode-save">Save</button>
+                <button class="btn" id="opencode-test">Test</button>
+                <button class="btn btn-ghost btn-danger-text" id="opencode-remove">Remove</button>
+              </div>
+              <p class="hint" id="opencode-hint"></p>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Model for new keys</h2>
+                  <p class="muted">The model is chosen per API key. This default applies when you create one.</p>
+                </div>
+              </div>
+              <div class="field-row">
+                <select class="input select" id="default-model"></select>
+                <button class="btn" id="save-default-model">Save default</button>
+              </div>
+              <div id="model-notes" class="model-notes"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Install the client</h2>
+                  <p class="muted">The client runs wherever Claude Code runs; its tmux session is shipped here.</p>
+                </div>
+              </div>
+              <pre class="code" id="install-command">—</pre>
+              <pre class="code" id="login-command">—</pre>
+            </section>
+          </div>
+
+          <div class="stack">
+            <section class="panel">
+              <h2>Account</h2>
+              <dl class="facts">
+                <dt>User</dt><dd id="fact-user">—</dd>
+                <dt>Email</dt><dd id="fact-email">—</dd>
+                <dt>Web</dt><dd id="fact-web">—</dd>
+                <dt>API</dt><dd id="fact-api">—</dd>
+              </dl>
+            </section>
+            <section class="panel">
+              <h2>Server</h2>
+              <dl class="facts">
+                <dt>Version</dt><dd id="fact-version">—</dd>
+                <dt>Uptime</dt><dd id="fact-uptime">—</dd>
+                <dt>Upstream</dt><dd id="fact-upstream">—</dd>
+                <dt>Agents</dt><dd id="fact-agents">—</dd>
+              </dl>
+              <p class="hint">The web UI is protected by nginx + Authelia. The API is public and key-authenticated.</p>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-root" id="modal-root" hidden>
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-head">
+        <h2 id="modal-title">Dialog</h2>
+        <button class="icon-btn" id="modal-x" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-actions" id="modal-actions"></div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

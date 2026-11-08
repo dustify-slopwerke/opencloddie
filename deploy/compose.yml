@@ -1,0 +1,43 @@
+# Run opencloddie next to the existing edge nginx + Authelia stack.
+#
+#   docker compose -f deploy/compose.yml up -d --build
+#
+# The service joins the external `edge` network used by ~/compose/edge and
+# ~/compose/authelia.  It publishes no host ports: nginx reaches it at
+# http://opencloddie:8787 (web) and http://opencloddie:8788 (api).
+name: opencloddie
+
+services:
+  opencloddie:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: opencloddie:latest
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+      OPENCLODDIE_CONFIG: /data/config.json
+      OPENCLODDIE_STATE_DIR: /data
+      # Optional: pin the at-rest encryption key outside the volume.
+      # OPENCLODDIE_MASTER_SECRET: ${OPENCLODDIE_MASTER_SECRET:-}
+    volumes:
+      - opencloddie-data:/data
+    expose:
+      - "8787"
+      - "8788"
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  opencloddie-data:
+
+networks:
+  edge:
+    external: true

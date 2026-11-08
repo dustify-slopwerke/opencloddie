@@ -1,0 +1,1386 @@
+#!/usr/bin/env python3
+"""opencloddie - run Claude Code in a tmux session shipped to your server.
+
+Install:
+  curl -fsSL https://your.opencloddie.host/install/opencloddie \
+    -o ~/.local/bin/opencloddie && chmod +x ~/.local/bin/opencloddie
+
+First run configures the server URL and API key, creates a tmux session running
+Claude Code pointed at the opencloddie gateway, starts a small agent that ships
+each terminal channel to the web UI, and attaches your terminal.
+
+  opencloddie                 new/reuse a session in the current directory
+  opencloddie --name work     named session
+  opencloddie ls              list sessions
+  opencloddie attach work     re-attach locally
+  opencloddie stop work       stop the tmux session and unregister it
+  opencloddie web             open the web UI
+  opencloddie env             print gateway environment variables
+  opencloddie exec [...]      run claude in this terminal via the gateway
+
+Ctrl-b d detaches the local terminal; the tmux session and its agent keep
+running, so the web UI can still drive it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import fcntl
+import getpass
+import hashlib
+import json
+import os
+import pty
+import re
+import secrets
+import select
+import shlex
+import shutil
+import signal
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = "0.1.0"
+APP = "opencloddie"
+USER_AGENT = f"{APP}-cli/{VERSION}"
+DEFAULT_TIMEOUT = 30
+
+
+# --------------------------------------------------------------------------
+# config
+# --------------------------------------------------------------------------
+def config_dir() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, APP)
+
+
+def state_dir() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    path = os.path.join(base, APP)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def cache_dir() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    path = os.path.join(base, APP)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def config_path() -> str:
+    return os.environ.get("OPENCLODDIE_CONFIG") or os.path.join(config_dir(), "config.json")
+
+
+def sessions_path() -> str:
+    override = os.environ.get("OPENCLODDIE_CONFIG")
+    if override:
+        # Keep local bookkeeping next to an explicitly selected config.
+        return os.path.join(os.path.dirname(os.path.abspath(override)), "sessions.json")
+    return os.path.join(config_dir(), "sessions.json")
+
+
+def read_json(path: str, default):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return default
+
+
+def write_json(path: str, data, mode: int = 0o600) -> None:
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def load_config() -> dict:
+    return read_json(config_path(), {}) or {}
+
+
+def save_config(cfg: dict) -> None:
+    write_json(config_path(), cfg)
+
+
+def norm_server(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if not re.match(r"^https?://", value, re.I):
+        host = value.split("/", 1)[0].split(":", 1)[0]
+        scheme = "http" if host in ("localhost", "127.0.0.1", "::1") else "https"
+        value = f"{scheme}://{value}"
+    for suffix in ("/v1/messages", "/v1", "/gateway"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+    return value
+
+
+def redact_key(key: str) -> str:
+    if not key:
+        return ""
+    return "*" * max(0, len(key) - 4) + key[-4:]
+
+
+# --------------------------------------------------------------------------
+# HTTP API
+# --------------------------------------------------------------------------
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def api_call(cfg: dict, method: str, path: str, body=None, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    server = norm_server(cfg.get("server", ""))
+    if not server:
+        raise ApiError(0, "no server configured; run `opencloddie login`")
+    url = server + path
+    data = None
+    headers = {
+        "Authorization": f"Bearer {cfg.get('api_key', '')}",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            try:
+                return json.loads(raw.decode("utf-8")) if raw else {}
+            except json.JSONDecodeError as exc:
+                raise ApiError(response.status, "server returned invalid JSON") from exc
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(8192)
+        message = raw.decode("utf-8", "replace")
+        try:
+            parsed = json.loads(message)
+            message = (
+                parsed.get("error", {}).get("message")
+                or parsed.get("message")
+                or message
+            )
+        except json.JSONDecodeError:
+            pass
+        raise ApiError(exc.code, str(message)[:500]) from exc
+    except urllib.error.URLError as exc:
+        raise ApiError(0, f"cannot reach {server}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ApiError(0, f"timed out talking to {server}") from exc
+
+
+def login_flow(server: str, api_key: str, *, quiet: bool = False) -> dict:
+    server = norm_server(server)
+    api_key = (api_key or "").strip()
+    if not server or not api_key:
+        raise ApiError(0, "server URL and API key are required")
+    probe = {"server": server, "api_key": api_key}
+    me = api_call(probe, "GET", "/client/me")
+    cfg = {
+        "server": server,
+        "api_key": api_key,
+        "web_url": me.get("web_url") or server,
+        "username": (me.get("user") or {}).get("username", ""),
+        "model": me.get("model", ""),
+        "claude_bin": load_config().get("claude_bin") or "",
+    }
+    save_config(cfg)
+    if not quiet:
+        print(f"connected to {server}")
+        print(f"  user:   {cfg['username']}")
+        print(f"  model:  {cfg['model']}")
+        print(f"  web:    {cfg['web_url']}")
+        if load_sessions():
+            print(
+                "\n  note: running sessions keep their previous API key until restarted.\n"
+                "        Use `opencloddie stop NAME` then start it again to apply the new key."
+            )
+        if not me.get("opencode_key_set"):
+            print()
+            print("  ! No OpenCode API key is configured for your account.")
+            print(f"    Add one at {cfg['web_url']} settings, or Claude requests will fail.")
+    return cfg
+
+
+def ensure_config(*, prompt: bool = True) -> dict:
+    cfg = load_config()
+    env_server = os.environ.get("OPENCLODDIE_SERVER")
+    env_key = os.environ.get("OPENCLODDIE_API_KEY")
+    if env_server or env_key:
+        cfg = dict(cfg)
+        if env_server:
+            cfg["server"] = norm_server(env_server)
+        if env_key:
+            cfg["api_key"] = env_key
+    if cfg.get("server") and cfg.get("api_key"):
+        return cfg
+    if os.environ.get("OPENCLODDIE_SERVER") and os.environ.get("OPENCLODDIE_API_KEY"):
+        return cfg
+    if not prompt or not sys.stdin.isatty():
+        raise SystemExit(
+            "opencloddie is not configured.\n"
+            "Run: opencloddie login --server https://your.host --api-key ocd_sk_...\n"
+            "or set OPENCLODDIE_SERVER and OPENCLODDIE_API_KEY."
+        )
+    print("First run: connect opencloddie to your server.")
+    server = input("Server URL (e.g. https://cloddie.example.com): ").strip()
+    key = getpass.getpass("API key (ocd_sk_...): ").strip()
+    return login_flow(server, key)
+
+
+# --------------------------------------------------------------------------
+# local session bookkeeping
+# --------------------------------------------------------------------------
+def load_sessions() -> dict:
+    return (read_json(sessions_path(), {}) or {}).get("sessions", {})
+
+
+def save_sessions(sessions: dict) -> None:
+    write_json(sessions_path(), {"sessions": sessions})
+
+
+def slug(value: str, fallback: str = "session") -> str:
+    text = re.sub(r"[^a-z0-9._-]+", "-", (value or "").lower()).strip("-._")
+    return (text[:32] or fallback).strip("-._") or fallback
+
+
+def tmux_has(name: str) -> bool:
+    if not name or not shutil.which("tmux"):
+        return False
+    return subprocess.run(
+        ["tmux", "has-session", "-t", f"={name}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def tmux_kill(name: str) -> bool:
+    if not name:
+        return False
+    return subprocess.run(
+        ["tmux", "kill-session", "-t", f"={name}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def pid_is_agent(pid: int, session_id: str) -> bool:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        return "__agent" in cmdline and session_id in cmdline
+    except OSError:
+        return pid_alive(pid)
+
+
+def find_local_session(sessions: dict, target: str) -> tuple[str, dict] | tuple[None, None]:
+    if target in sessions:
+        return target, sessions[target]
+    matches = [(sid, s) for sid, s in sessions.items() if s.get("name") == target]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise SystemExit(f"multiple local sessions named {target!r}; use the session id")
+    return None, None
+
+
+def find_or_create_mapping(sessions: dict, name: str, cwd: str, *, force_new: bool) -> tuple[str, dict]:
+    if not force_new:
+        for sid, item in sessions.items():
+            if item.get("name") == name and item.get("cwd") == cwd:
+                return sid, item
+    session_id = "s_" + secrets.token_hex(8)
+    tmux_name = f"ocd-{slug(name)}-{secrets.token_hex(4)}"
+    item = {
+        "id": session_id,
+        "name": name,
+        "cwd": cwd,
+        "tmux": tmux_name,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    sessions[session_id] = item
+    save_sessions(sessions)
+    return session_id, item
+
+
+# --------------------------------------------------------------------------
+# session environment / runner
+# --------------------------------------------------------------------------
+def find_claude_bin(cfg: dict) -> str:
+    configured = (cfg.get("claude_bin") or "").strip()
+    if configured:
+        return configured
+    found = shutil.which("claude")
+    if not found:
+        raise SystemExit(
+            'opencloddie: "claude" not found on PATH. Install Claude Code first '
+            "(https://claude.com/claude-code)."
+        )
+    return found
+
+
+def gateway_env(cfg: dict, me: dict) -> dict[str, str]:
+    model = me.get("model") or cfg.get("model") or "deepseek-v4.1-flash"
+    env = {
+        "ANTHROPIC_BASE_URL": norm_server(cfg["server"]),
+        "ANTHROPIC_AUTH_TOKEN": cfg["api_key"],
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+    }
+    context = me.get("context_tokens")
+    if context:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context)
+    return env
+
+
+def write_runner(item: dict, cfg: dict, me: dict, claude_args: list[str]) -> str:
+    model = me.get("model") or cfg.get("model") or "deepseek-v4.1-flash"
+    claude_bin = find_claude_bin(cfg)
+    env = gateway_env(cfg, me)
+    cmd = [claude_bin, "--model", model] + list(claude_args)
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -u",
+        f"cd -- {shlex.quote(item['cwd'])}",
+    ]
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ):
+        lines.append(f"unset {key}")
+    for key, value in env.items():
+        lines.append(f"export {key}={shlex.quote(value)}")
+    lines += [
+        "while :; do",
+        f"  {shlex.join(cmd)}",
+        "  printf '\\n[claude exited - press Enter to restart, Ctrl-b d to detach]\\n'",
+        "  read -r _ || break",
+        "done",
+        "",
+    ]
+    path = os.path.join(cache_dir(), f"runner-{item['id']}.sh")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    os.chmod(path, 0o700)
+    return path
+
+
+def start_local_session(cfg: dict, name: str, cwd: str, claude_args: list[str], *, force_new: bool) -> tuple[str, dict]:
+    if not shutil.which("tmux"):
+        raise SystemExit("opencloddie: tmux is required. Install it (e.g. `apt install tmux`).")
+    if not os.path.isdir(cwd):
+        raise SystemExit(f"opencloddie: working directory does not exist: {cwd}")
+    me = api_call(cfg, "GET", "/client/me")
+    sessions = load_sessions()
+    session_id, item = find_or_create_mapping(sessions, name, cwd, force_new=force_new)
+    item["name"] = name
+    item["cwd"] = cwd
+    item["model"] = me.get("model", "")
+    fingerprint = hashlib.sha256(
+        f"{cfg.get('api_key','')}|{item['model']}|{me.get('context_tokens')}".encode()
+    ).hexdigest()[:12]
+    if tmux_has(item["tmux"]) and item.get("fingerprint") and item["fingerprint"] != fingerprint:
+        print(
+            "opencloddie: warning: this session was started with a different API key/model.\n"
+            "  The running Claude process keeps its old environment; restart with\n"
+            f"  `opencloddie stop {shlex.quote(item['name'])}` and start it again to apply.",
+            file=sys.stderr,
+        )
+    item["fingerprint"] = fingerprint
+    save_sessions(sessions)
+
+    if not tmux_has(item["tmux"]):
+        runner = write_runner(item, cfg, me, claude_args)
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", item["tmux"], "-c", cwd, "--", "bash", runner],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                "opencloddie: could not create tmux session: "
+                + (result.stderr.strip() or f"exit {result.returncode}")
+            )
+    ensure_agent(cfg, item)
+    if not me.get("opencode_key_set"):
+        print(
+            f"opencloddie: warning: no OpenCode key configured for {me.get('user', {}).get('username', 'this user')}.\n"
+            f"  Add one at {me.get('web_url') or cfg.get('web_url') or cfg['server']} before Claude can answer.",
+            file=sys.stderr,
+        )
+    return session_id, item
+
+
+def ensure_agent(cfg: dict, item: dict, *, wait: bool = True) -> bool:
+    pidfile = os.path.join(state_dir(), f"agent-{item['id']}.pid")
+    logfile = os.path.join(state_dir(), f"agent-{item['id']}.log")
+    try:
+        with open(pidfile, "r", encoding="utf-8") as fh:
+            pid = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    if pid and pid_is_agent(pid, item["id"]):
+        return True
+    try:
+        if os.path.getsize(logfile) > 5 * 1024 * 1024:
+            with open(logfile, "wb") as fh:
+                fh.truncate(0)
+    except OSError:
+        pass
+    script = os.path.realpath(__file__)
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    cmd = [
+        sys.executable,
+        script,
+        "__agent",
+        "--config",
+        config_path(),
+        "--session-id",
+        item["id"],
+        "--tmux",
+        item["tmux"],
+        "--name",
+        item["name"],
+        "--cwd",
+        item["cwd"],
+    ]
+    log_handle = open(logfile, "ab")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+    finally:
+        log_handle.close()
+    with open(pidfile, "w", encoding="utf-8") as fh:
+        fh.write(str(proc.pid))
+    item["agent_pid"] = proc.pid
+    item["log"] = logfile
+    if wait:
+        _wait_online(cfg, item["id"], logfile, timeout=10)
+    return True
+
+
+def _wait_online(cfg: dict, session_id: str, logfile: str, timeout: float) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data = api_call(cfg, "GET", "/client/sessions", timeout=5)
+            for session in data.get("sessions", []):
+                if session.get("id") == session_id and session.get("online"):
+                    return
+        except ApiError:
+            pass
+        time.sleep(0.5)
+    print("opencloddie: session is running locally, but the web agent has not registered yet.", file=sys.stderr)
+    print(f"  agent log: {logfile}", file=sys.stderr)
+    try:
+        with open(logfile, "r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.read()[-1200:]
+        if tail.strip():
+            print("  " + tail.strip().replace("\n", "\n  "), file=sys.stderr)
+    except OSError:
+        pass
+
+
+def stop_agent(item: dict) -> None:
+    pidfile = os.path.join(state_dir(), f"agent-{item['id']}.pid")
+    pid = 0
+    try:
+        with open(pidfile, "r", encoding="utf-8") as fh:
+            pid = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        pass
+    if pid and pid_is_agent(pid, item["id"]):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 3
+        while time.time() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+        if pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:
+        os.unlink(pidfile)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+def cmd_run(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    cwd = os.path.abspath(args.cwd or os.getcwd())
+    name = (args.name or os.path.basename(cwd) or "session").strip()[:60]
+    claude_args = list(args.claude_args)
+    if claude_args and claude_args[0] == "--":
+        claude_args = claude_args[1:]
+    _, item = start_local_session(cfg, name, cwd, claude_args, force_new=args.new)
+    tmux_name = item["tmux"]
+    if args.no_attach or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"session {item['name']!r} is running in tmux {tmux_name}")
+        print(f"  attach: tmux attach -t {tmux_name}")
+        print(f"  web:    {cfg.get('web_url') or cfg['server']}")
+        return 0
+    os.environ.pop("TMUX", None)
+    print(f"attaching to {item['name']} ({tmux_name}); detach with Ctrl-b d", file=sys.stderr)
+    try:
+        os.execvp("tmux", ["tmux", "attach-session", "-t", tmux_name])
+    except OSError as exc:
+        raise SystemExit(f"opencloddie: could not attach: {exc}") from exc
+    return 0
+
+
+def cmd_attach(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    sessions = load_sessions()
+    if not args.target:
+        if len(sessions) == 1:
+            target = next(iter(sessions))
+        else:
+            rows = [(sid, s) for sid, s in sessions.items() if tmux_has(s.get("tmux", ""))]
+            if not rows:
+                raise SystemExit("no local sessions; run `opencloddie` first")
+            if len(rows) > 1:
+                print("local sessions:")
+                for sid, s in rows:
+                    print(f"  {s['name']:24} {sid}  {s['tmux']}")
+                raise SystemExit("specify a session name")
+            target = rows[0][0]
+    else:
+        target = args.target
+    sid, item = find_local_session(sessions, target)
+    if not sid:
+        raise SystemExit(f"no local session named {target!r}")
+    if not tmux_has(item["tmux"]):
+        raise SystemExit(f"tmux session {item['tmux']} is gone; run `opencloddie --name {item['name']}`")
+    ensure_agent(cfg, item)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"tmux attach -t {item['tmux']}")
+        return 0
+    os.environ.pop("TMUX", None)
+    try:
+        os.execvp("tmux", ["tmux", "attach-session", "-t", item["tmux"]])
+    except OSError as exc:
+        raise SystemExit(f"opencloddie: could not attach: {exc}") from exc
+    return 0
+
+
+def cmd_ls(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    data = api_call(cfg, "GET", "/client/sessions")
+    sessions = data.get("sessions", [])
+    if args.json:
+        print(json.dumps(sessions, indent=2))
+        return 0
+    local = load_sessions()
+    if not sessions:
+        print("no sessions registered yet; run `opencloddie` on a machine with Claude Code")
+        return 0
+    print(f"{'NAME':24} {'ID':20} {'ONLINE':7} {'MODEL':26} {'CWD':32} 'HOST'")
+    for s in sessions:
+        online = "yes" if s.get("online") else "no"
+        tag = " *local" if s.get("id") in local else ""
+        print(
+            f"{str(s.get('name',''))[:24]:24} {str(s.get('id','')):20} {online:7} "
+            f"{str(s.get('model',''))[:26]:26} {str(s.get('cwd',''))[:32]:32} "
+            f"{str(s.get('hostname',''))[:24]}{tag}"
+        )
+    print("\n* local session on this machine")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    sessions = load_sessions()
+    sid, item = find_local_session(sessions, args.target)
+    targets = []
+    if sid:
+        targets.append(sid)
+        tmux_kill(item.get("tmux", ""))
+        stop_agent(item)
+        sessions.pop(sid, None)
+        save_sessions(sessions)
+        print(f"stopped local session {item.get('name')} ({sid})")
+    else:
+        # Maybe the session lives on another machine and is only known remotely.
+        data = api_call(cfg, "GET", "/client/sessions")
+        for s in data.get("sessions", []):
+            if s.get("id") == args.target or s.get("name") == args.target:
+                targets.append(s["id"])
+        if not targets:
+            raise SystemExit(f"no session named {args.target!r} (local or remote)")
+    for target in targets:
+        try:
+            api_call(cfg, "DELETE", f"/client/sessions/{target}")
+            print(f"removed server session {target}")
+        except ApiError as exc:
+            if exc.status != 404:
+                print(f"warning: could not remove {target}: {exc.message}", file=sys.stderr)
+    return 0
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    url = cfg.get("web_url") or cfg.get("server")
+    try:
+        me = api_call(cfg, "GET", "/client/me", timeout=10)
+        url = me.get("web_url") or url
+    except ApiError:
+        pass
+    print(url)
+    if not args.no_open and sys.stdout.isatty():
+        try:
+            import webbrowser
+
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
+
+
+def cmd_env(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    me = api_call(cfg, "GET", "/client/me")
+    env = gateway_env(cfg, me)
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ):
+        print(f"unset {key}")
+    for key, value in env.items():
+        print(f"export {key}={shlex.quote(value)}")
+    print("# Add the opencloddie API key to this shell only; it is a credential.")
+    return 0
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    me = api_call(cfg, "GET", "/client/me")
+    env = dict(os.environ)
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ):
+        env.pop(key, None)
+    env.update(gateway_env(cfg, me))
+    model = me.get("model") or cfg.get("model")
+    claude_bin = find_claude_bin(cfg)
+    argv = [claude_bin]
+    if model:
+        argv += ["--model", model]
+    argv += list(args.claude_args)
+    os.execvpe(claude_bin, argv, env)
+    return 0
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    server = args.server or input("Server URL: ").strip()
+    api_key = args.api_key or getpass.getpass("API key (ocd_sk_...): ").strip()
+    try:
+        login_flow(server, api_key)
+    except ApiError as exc:
+        print(f"opencloddie: login failed: {exc.message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_logout(_args: argparse.Namespace) -> int:
+    try:
+        os.unlink(config_path())
+    except FileNotFoundError:
+        pass
+    print("removed local opencloddie config (server keys remain until revoked in the web UI)")
+    return 0
+
+
+def cmd_whoami(_args: argparse.Namespace) -> int:
+    cfg = ensure_config()
+    try:
+        me = api_call(cfg, "GET", "/client/me")
+    except ApiError as exc:
+        print(f"opencloddie: {exc.message}", file=sys.stderr)
+        return 1
+    user = me.get("user") or {}
+    print(f"server:  {cfg.get('server')}")
+    print(f"user:    {user.get('username') or cfg.get('username')}")
+    print(f"key:     {(me.get('key') or {}).get('name')} ({(me.get('key') or {}).get('id')})")
+    print(f"model:   {me.get('model')}")
+    print(f"web:     {me.get('web_url')}")
+    print(f"opencode key configured: {'yes' if me.get('opencode_key_set') else 'no'}")
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    if args.config_command == "path":
+        print(config_path())
+        return 0
+    shown = dict(cfg)
+    if shown.get("api_key"):
+        shown["api_key"] = redact_key(shown["api_key"])
+    print(json.dumps(shown, indent=2))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# WebSocket client (standalone; mirrors the server's protocol)
+# --------------------------------------------------------------------------
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0, 1, 2, 8, 9, 10
+
+
+class WSClosed(Exception):
+    pass
+
+
+class WSClient:
+    def __init__(self, sock, rfile, wfile):
+        self.sock = sock
+        self.rfile = rfile
+        self.wfile = wfile
+        self.lock = threading.Lock()
+        self.closed = False
+
+    @classmethod
+    def connect(cls, url: str, headers: dict | None = None, timeout: float | None = 20.0):
+        parts = urllib.parse.urlsplit(url)
+        secure = parts.scheme in ("wss", "https")
+        host = parts.hostname or ""
+        port = parts.port or (443 if secure else 80)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        raw = socket.create_connection((host, port), timeout=timeout)
+        if secure:
+            raw = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        lines = [
+            f"GET {path} HTTP/1.1",
+            f"Host: {host}:{port}",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {key}",
+            "Sec-WebSocket-Version: 13",
+            f"User-Agent: {USER_AGENT}",
+        ]
+        for name, value in (headers or {}).items():
+            lines.append(f"{name}: {value}")
+        raw.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+        rfile = raw.makefile("rb")
+        status = rfile.readline()
+        if not status:
+            raw.close()
+            raise WSClosed("empty handshake response")
+        if b" 101 " not in status:
+            body = rfile.read(512).decode("utf-8", "replace")
+            raw.close()
+            raise WSClosed(f"handshake failed: {status.decode('latin-1').strip()} {body}")
+        accept = None
+        while True:
+            line = rfile.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            name, _, value = line.decode("latin-1").partition(":")
+            if name.strip().lower() == "sec-websocket-accept":
+                accept = value.strip()
+        import hashlib
+
+        expected = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+        if accept != expected:
+            raw.close()
+            raise WSClosed("invalid Sec-WebSocket-Accept")
+        raw.settimeout(None if timeout is None else timeout)
+        return cls(raw, rfile, raw.makefile("wb"))
+
+    def send(self, opcode: int, payload: bytes) -> None:
+        with self.lock:
+            if self.closed:
+                raise WSClosed("closed")
+            self.wfile.write(_encode(opcode, payload, mask=True))
+            self.wfile.flush()
+
+    def send_json(self, obj: dict) -> None:
+        self.send(OP_TEXT, json.dumps(obj, separators=(",", ":")).encode("utf-8"))
+
+    def recv(self):
+        chunks = []
+        opcode_msg = None
+        total = 0
+        while True:
+            opcode, payload, fin = _read_frame(self.rfile, require_mask=False)
+            if opcode == OP_CLOSE:
+                raise WSClosed("server closed")
+            if opcode == OP_PING:
+                self.send(OP_PONG, payload)
+                continue
+            if opcode == OP_PONG:
+                continue
+            if opcode == OP_CONT:
+                if opcode_msg is None:
+                    raise WSClosed("bad continuation")
+            else:
+                if opcode_msg is not None:
+                    raise WSClosed("interleaved message")
+                opcode_msg = opcode
+            chunks.append(payload)
+            total += len(payload)
+            if total > 16 * 1024 * 1024:
+                raise WSClosed("message too large")
+            if fin:
+                return opcode_msg, b"".join(chunks)
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                self.wfile.write(_encode(OP_CLOSE, struct.pack("!H", 1000), mask=True))
+                self.wfile.flush()
+            except OSError:
+                pass
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+def _encode(opcode: int, payload: bytes, *, mask: bool) -> bytes:
+    n = len(payload)
+    first = 0x80 | opcode
+    second = 0x80 if mask else 0
+    if n < 126:
+        header = bytes([first, second | n])
+    elif n < 65536:
+        header = bytes([first, second | 126]) + struct.pack("!H", n)
+    else:
+        header = bytes([first, second | 127]) + struct.pack("!Q", n)
+    if not mask:
+        return header + payload
+    key = os.urandom(4)
+    return header + key + bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+
+
+def _read_exact(rfile, n: int) -> bytes:
+    data = rfile.read(n)
+    if data is None or len(data) < n:
+        raise WSClosed("unexpected EOF")
+    return data
+
+
+def _read_frame(rfile, require_mask: bool):
+    head = _read_exact(rfile, 2)
+    fin = bool(head[0] & 0x80)
+    opcode = head[0] & 0x0F
+    masked = bool(head[1] & 0x80)
+    n = head[1] & 0x7F
+    if n == 126:
+        n = struct.unpack("!H", _read_exact(rfile, 2))[0]
+    elif n == 127:
+        n = struct.unpack("!Q", _read_exact(rfile, 8))[0]
+    if n > 16 * 1024 * 1024:
+        raise WSClosed("frame too large")
+    key = _read_exact(rfile, 4) if masked else b""
+    payload = _read_exact(rfile, n) if n else b""
+    if masked:
+        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+    return opcode, payload, fin
+
+
+# --------------------------------------------------------------------------
+# PTY helpers (standalone)
+# --------------------------------------------------------------------------
+class Pty:
+    def __init__(self, master: int, proc: subprocess.Popen):
+        self.master = master
+        self.proc = proc
+        self.closed = False
+
+    def resize(self, cols: int, rows: int) -> None:
+        try:
+            fcntl.ioctl(
+                self.master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", max(2, min(int(rows), 1000)), max(2, min(int(cols), 1000)), 0, 0),
+            )
+        except OSError:
+            pass
+
+    def write(self, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(self.master, view)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError:
+                return
+            view = view[written:]
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+        finally:
+            try:
+                os.close(self.master)
+            except OSError:
+                pass
+
+
+def spawn_pty(argv: list[str], cols: int, rows: int) -> Pty:
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        env = dict(os.environ)
+        env["TERM"] = env.get("TERM") or "xterm-256color"
+        env.pop("TMUX", None)
+        proc = subprocess.Popen(
+            argv,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        os.close(master)
+        os.close(slave)
+        raise
+    os.close(slave)
+    return Pty(master, proc)
+
+
+def pump_pty(proc: Pty, on_data, stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            ready, _, _ = select.select([proc.master], [], [], 0.2)
+        except (OSError, ValueError):
+            break
+        if not ready:
+            if proc.proc.poll() is not None:
+                break
+            continue
+        try:
+            data = os.read(proc.master, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        try:
+            on_data(data)
+        except Exception:  # noqa: BLE001
+            break
+
+
+# --------------------------------------------------------------------------
+# agent
+# --------------------------------------------------------------------------
+class Agent:
+    def __init__(self, args: argparse.Namespace):
+        self.config_file = args.config
+        self.session_id = args.session_id
+        self.tmux = args.tmux
+        self.name = args.name
+        self.cwd = args.cwd
+        self.agent_id = args.agent_id or ("a-" + secrets.token_hex(8))
+        self.stop_event = threading.Event()
+        self.ws: WSClient | None = None
+        self.ws_lock = threading.Lock()
+        self.channels: dict[int, tuple[Pty, threading.Event]] = {}
+        self.channels_lock = threading.Lock()
+
+    def log(self, message: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        print(f"[{stamp}] {message}", file=sys.stderr, flush=True)
+
+    def _cfg(self) -> dict:
+        cfg = read_json(self.config_file, {}) or {}
+        if not cfg.get("server") or not cfg.get("api_key"):
+            raise SystemExit("agent: config disappeared or is incomplete")
+        return cfg
+
+    def run(self) -> int:
+        threading.Thread(target=self._monitor, name="monitor", daemon=True).start()
+        backoff = 1.0
+        while not self.stop_event.is_set():
+            if not tmux_has(self.tmux):
+                self.log(f"tmux session {self.tmux} is gone; exiting")
+                self.stop()
+                break
+            try:
+                self._session()
+                backoff = 1.0
+            except WSClosed as exc:
+                if self.stop_event.is_set():
+                    break
+                text = str(exc)
+                self.log(f"websocket closed: {text}")
+                if "401" in text or "403" in text:
+                    self.log("authentication failed; retrying in 60s (check `opencloddie login`)")
+                    if self.stop_event.wait(60):
+                        break
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                if self.stop_event.is_set():
+                    break
+                self.log(f"connection error: {type(exc).__name__}: {exc}")
+            if self.stop_event.is_set():
+                break
+            self.stop_event.wait(backoff)
+            backoff = min(30.0, backoff * 2)
+        self._close_all_channels()
+        self.log("agent stopped")
+        return 0
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        with self.ws_lock:
+            ws = self.ws
+            self.ws = None
+        if ws:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._close_all_channels()
+
+    def _monitor(self) -> None:
+        misses = 0
+        while not self.stop_event.wait(10):
+            if tmux_has(self.tmux):
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 3:
+                    self.log("tmux session disappeared; stopping agent")
+                    self.stop()
+                    return
+
+    def _session(self) -> None:
+        cfg = self._cfg()
+        server = norm_server(cfg["server"])
+        url = server + "/agent/ws?agent_id=" + urllib.parse.quote(self.agent_id)
+        self.log(f"connecting to {server}")
+        ws = WSClient.connect(url, headers={"Authorization": f"Bearer {cfg['api_key']}"}, timeout=20)
+        with self.ws_lock:
+            self.ws = ws
+        ws.send_json(
+            {
+                "t": "hello",
+                "agent_id": self.agent_id,
+                "version": VERSION,
+                "hostname": socket.gethostname(),
+                "platform": sys.platform,
+                "session": {
+                    "id": self.session_id,
+                    "name": self.name,
+                    "cwd": self.cwd,
+                },
+            }
+        )
+        welcome_seen = False
+        heartbeat = threading.Thread(target=self._heartbeat, args=(ws,), name="heartbeat", daemon=True)
+        heartbeat.start()
+        try:
+            while not self.stop_event.is_set():
+                opcode, payload = ws.recv()
+                if opcode != OP_TEXT:
+                    continue
+                try:
+                    message = json.loads(payload.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                kind = message.get("t")
+                if kind == "welcome":
+                    welcome_seen = True
+                    self.log(f"registered session {self.session_id} (model {message.get('model')})")
+                elif kind == "open":
+                    self._open_channel(message)
+                elif kind == "in":
+                    channel = self.channels.get(int(message.get("ch", -1)))
+                    if channel:
+                        try:
+                            channel[0].write(base64.b64decode(message.get("data", "")))
+                        except Exception:  # noqa: BLE001
+                            pass
+                elif kind == "resize":
+                    channel = self.channels.get(int(message.get("ch", -1)))
+                    if channel:
+                        channel[0].resize(int(message.get("cols", 80)), int(message.get("rows", 24)))
+                elif kind == "close":
+                    self._close_channel(int(message.get("ch", -1)))
+                elif kind == "kill":
+                    self.log("server requested kill; stopping session")
+                    tmux_kill(self.tmux)
+                    self.stop()
+                    return
+                elif kind == "pong":
+                    pass
+        finally:
+            with self.ws_lock:
+                if self.ws is ws:
+                    self.ws = None
+            self._close_all_channels()
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if not welcome_seen:
+                self.log("connection closed before registration")
+
+    def _heartbeat(self, ws: WSClient) -> None:
+        while not self.stop_event.wait(20):
+            try:
+                ws.send_json({"t": "ping", "ts": time.time()})
+            except Exception:  # noqa: BLE001
+                return
+
+    def _open_channel(self, message: dict) -> None:
+        ch = int(message.get("ch", -1))
+        if ch < 0:
+            return
+        if not tmux_has(self.tmux):
+            self._send({"t": "error", "ch": ch, "message": "tmux session is gone"})
+            self._send({"t": "exit", "ch": ch, "code": 1})
+            return
+        cols = max(2, min(int(message.get("cols", 120)), 500))
+        rows = max(2, min(int(message.get("rows", 32)), 500))
+        try:
+            proc = spawn_pty(["tmux", "attach-session", "-t", self.tmux], cols, rows)
+        except Exception as exc:  # noqa: BLE001
+            self._send({"t": "error", "ch": ch, "message": f"cannot attach: {exc}"})
+            self._send({"t": "exit", "ch": ch, "code": 1})
+            return
+        stop = threading.Event()
+        with self.channels_lock:
+            self.channels[ch] = (proc, stop)
+        self._send({"t": "opened", "ch": ch})
+
+        def reader() -> None:
+            def on_data(data: bytes) -> None:
+                self._send({"t": "out", "ch": ch, "data": base64.b64encode(data).decode("ascii")})
+
+            pump_pty(proc, on_data, stop)
+            stop.set()
+            code = proc.proc.poll()
+            proc.close()
+            with self.channels_lock:
+                self.channels.pop(ch, None)
+            self._send({"t": "exit", "ch": ch, "code": code})
+
+        threading.Thread(target=reader, name=f"pty-{ch}", daemon=True).start()
+
+    def _close_channel(self, ch: int) -> None:
+        with self.channels_lock:
+            channel = self.channels.pop(ch, None)
+        if channel:
+            channel[1].set()
+            channel[0].close()
+
+    def _close_all_channels(self) -> None:
+        with self.channels_lock:
+            channels = list(self.channels.values())
+            self.channels.clear()
+        for proc, stop in channels:
+            stop.set()
+            proc.close()
+
+    def _send(self, obj: dict) -> None:
+        with self.ws_lock:
+            ws = self.ws
+        if ws is None:
+            return
+        try:
+            ws.send_json(obj)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    agent = Agent(args)
+    signal.signal(signal.SIGTERM, lambda *_: agent.stop())
+    signal.signal(signal.SIGINT, lambda *_: agent.stop())
+    return agent.run()
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="Run Claude Code in a tmux session shipped to your opencloddie server.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Ctrl-b d detaches locally. The session keeps running and appears in the web UI.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    sub = parser.add_subparsers(dest="command")
+
+    run = sub.add_parser("run", help="start or re-attach a local session")
+    run.add_argument("-n", "--name", help="session name (default: current directory)")
+    run.add_argument("-C", "--cwd", help="working directory (default: current directory)")
+    run.add_argument("--new", action="store_true", help="create a new session even if one matches")
+    run.add_argument("--no-attach", action="store_true", help="start in the background only")
+    run.add_argument("claude_args", nargs=argparse.REMAINDER, help="extra args passed to claude (after --)")
+    run.set_defaults(func=cmd_run)
+
+    attach = sub.add_parser("attach", help="attach to a local session")
+    attach.add_argument("target", nargs="?")
+    attach.set_defaults(func=cmd_attach)
+
+    ls = sub.add_parser("ls", help="list registered sessions")
+    ls.add_argument("--json", action="store_true")
+    ls.set_defaults(func=cmd_ls)
+
+    stop = sub.add_parser("stop", help="stop a session locally and unregister it")
+    stop.add_argument("target")
+    stop.set_defaults(func=cmd_stop)
+
+    web = sub.add_parser("web", help="open the web UI")
+    web.add_argument("--no-open", action="store_true")
+    web.set_defaults(func=cmd_web)
+
+    env = sub.add_parser("env", help="print gateway environment variables")
+    env.set_defaults(func=cmd_env)
+
+    execute = sub.add_parser("exec", help="run claude in this terminal through the gateway")
+    execute.add_argument("claude_args", nargs=argparse.REMAINDER)
+    execute.set_defaults(func=cmd_exec)
+
+    login = sub.add_parser("login", help="configure server URL and API key")
+    login.add_argument("--server")
+    login.add_argument("--api-key")
+    login.set_defaults(func=cmd_login)
+
+    logout = sub.add_parser("logout", help="remove local credentials")
+    logout.set_defaults(func=cmd_logout)
+
+    who = sub.add_parser("whoami", help="show the connected account")
+    who.set_defaults(func=cmd_whoami)
+
+    conf = sub.add_parser("config", help="show config")
+    conf.add_argument("config_command", nargs="?", choices=["show", "path"], default="show")
+    conf.set_defaults(func=cmd_config)
+
+    version = sub.add_parser("version", help="print version")
+    version.set_defaults(func=lambda _a: print(VERSION) or 0)
+
+    internal = sub.add_parser("__agent", help=argparse.SUPPRESS)
+    internal.add_argument("--config", required=True)
+    internal.add_argument("--session-id", required=True)
+    internal.add_argument("--tmux", required=True)
+    internal.add_argument("--name", required=True)
+    internal.add_argument("--cwd", required=True)
+    internal.add_argument("--agent-id")
+    internal.set_defaults(func=cmd_agent)
+
+    return parser
+
+
+KNOWN = {
+    "run", "attach", "ls", "stop", "web", "env", "exec",
+    "login", "logout", "whoami", "config", "version", "help", "__agent",
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("-h", "--help"):
+        build_parser().print_help()
+        return 0
+    if argv and argv[0] in ("-v", "--version"):
+        print(VERSION)
+        return 0
+    if argv and argv[0] == "help":
+        build_parser().print_help()
+        return 0
+    if not argv or argv[0] not in KNOWN:
+        argv = ["run"] + argv
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 2
+    if getattr(args, "command", None) == "run" and extra:
+        args.claude_args = list(args.claude_args) + extra
+    try:
+        return int(args.func(args) or 0)
+    except ApiError as exc:
+        print(f"opencloddie: {exc.message}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

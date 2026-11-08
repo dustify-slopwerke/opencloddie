@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Compile
+        run: python3 -m py_compile opencloddie/*.py bin/opencloddie bin/opencloddie-server
+      - name: Test
+        run: python3 -m unittest discover -s tests -v
+      - name: Build container
+        run: docker build -f deploy/Dockerfile -t opencloddie:test .
