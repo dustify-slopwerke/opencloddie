@@ -571,7 +571,7 @@ function computeGrid(count, width, height) {
   if (count <= 1) return { cols: 1, rows: 1 };
   const gap = 6;
   const pad = 6;
-  const header = 28;
+  const header = 21;
   const usableW = Math.max(1, width - pad * 2);
   const usableH = Math.max(1, height - pad * 2);
   let best = null;
