@@ -6,6 +6,8 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
 ### Added
 
 - WebGL renderer for the browser terminal (`@xterm/addon-webgl` 0.18.0), with
@@ -95,6 +97,7 @@ First public release.
 - Clipboard copy works from xterm selections, the visible screen, and the tmux
   paste buffer.
 
-[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.1.0

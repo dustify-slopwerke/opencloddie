@@ -1,14 +1,14 @@
 # Releasing
 
 opencloddie uses [Semantic Versioning](https://semver.org/) and GitHub Releases.
-The current release version is **0.2.0**.
+The current release version is **0.3.0**.
 
 ## Version sources
 
 The version lives in exactly one place — `opencloddie/__init__.py`:
 
 ```python
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 ```
 
 - `pyproject.toml` reads it dynamically.
@@ -41,13 +41,14 @@ Use the helper after the checklist:
 
 ```bash
 ./scripts/release.sh          # tests + local annotated tag
-./scripts/release.sh --push   # push the tag to origin (triggers the release workflow)
-REMOTE=github ./scripts/release.sh --push   # or target the GitHub remote
+REMOTE=github ./scripts/release.sh --push   # push to GitHub (triggers the release workflow)
+./scripts/release.sh --push   # or push the tag to origin (Gitea; no workflow)
 ```
 
 ```bash
-git tag -a v0.2.0 -m "opencloddie 0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "opencloddie 0.3.0"
+git push github v0.3.0   # the release workflow runs on the github remote
+git push origin v0.3.0   # optional: keep the Gitea mirror in sync
 ```
 
 `.github/workflows/release.yml` then:
@@ -64,9 +65,9 @@ git push origin v0.2.0
 
 | Artifact | Location |
 | --- | --- |
-| Container image | `ghcr.io/dustify-slopwerke/opencloddie:0.2.0`, `:0.2`, `:latest` |
-| Wheel | `opencloddie-0.2.0-py3-none-any.whl` on the release |
-| Source distribution | `opencloddie-0.2.0.tar.gz` on the release |
+| Container image | `ghcr.io/dustify-slopwerke/opencloddie:0.3.0`, `:0.3`, `:latest` |
+| Wheel | `opencloddie-0.3.0-py3-none-any.whl` on the release |
+| Source distribution | `opencloddie-0.3.0.tar.gz` on the release |
 | Source archives | GitHub's automatic `zip`/`tar.gz` |
 | Client script | `opencloddie` on the release (also served by every server at `/install/opencloddie`) |
 
@@ -76,18 +77,18 @@ settings in GitHub and set its visibility to public if the world should pull it.
 ## Install the release
 
 ```bash
-docker pull ghcr.io/dustify-slopwerke/opencloddie:0.2.0
+docker pull ghcr.io/dustify-slopwerke/opencloddie:0.3.0
 docker run -d --name opencloddie \
   -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
   -v opencloddie-data:/data \
-  ghcr.io/dustify-slopwerke/opencloddie:0.2.0
+  ghcr.io/dustify-slopwerke/opencloddie:0.3.0
 ```
 
 Or install the wheel attached to the release:
 
 ```bash
 python3 -m pip install \
-  https://github.com/dustify-slopwerke/opencloddie/releases/download/v0.2.0/opencloddie-0.2.0-py3-none-any.whl
+  https://github.com/dustify-slopwerke/opencloddie/releases/download/v0.3.0/opencloddie-0.3.0-py3-none-any.whl
 opencloddie-server init
 opencloddie-server run
 ```
@@ -103,21 +104,21 @@ chmod +x ~/.local/bin/opencloddie
 
 ```bash
 # image tags and platforms
-docker buildx imagetools inspect ghcr.io/dustify-slopwerke/opencloddie:0.2.0
+docker buildx imagetools inspect ghcr.io/dustify-slopwerke/opencloddie:0.3.0
 
 # provenance (GitHub CLI)
-gh attestation verify oci://ghcr.io/dustify-slopwerke/opencloddie:0.2.0 --owner dustify-slopwerke
+gh attestation verify oci://ghcr.io/dustify-slopwerke/opencloddie:0.3.0 --owner dustify-slopwerke
 
 # image health
-docker run --rm --entrypoint opencloddie-server ghcr.io/dustify-slopwerke/opencloddie:0.2.0 --version
+docker run --rm --entrypoint opencloddie-server ghcr.io/dustify-slopwerke/opencloddie:0.3.0 --version
 
 # release assets
-gh release view v0.2.0 --repo dustify-slopwerke/opencloddie
+gh release view v0.3.0 --repo dustify-slopwerke/opencloddie
 ```
 
 ## Rollback
 
-- Pin deployments to an immutable tag (`:0.2.0` or a digest), not `:latest`.
+- Pin deployments to an immutable tag (`:0.3.0` or a digest), not `:latest`.
 - To roll back, redeploy the previous tag and keep the same `/data` volume.
 - Do not delete a published release/tag if users may have pinned it; publish a
   patch instead.
