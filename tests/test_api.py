@@ -83,7 +83,7 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         text = body.decode()
-        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert", 'id="layout-toggle"'):
+        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert", 'id="layout-toggle"', 'data-view="stats"', 'id="view-stats"'):
             self.assertIn(needle, text)
         status, _, js = self.server.request(self.server.web_port, "GET", "/app.js")
         self.assertEqual(status, 200)
@@ -91,11 +91,15 @@ class ApiTest(unittest.TestCase):
         self.assertIn(b"function closeDrawer", js)
         self.assertIn(b"function computeGrid", js)
         self.assertIn(b"function layoutTiles", js)
+        status, _, stats_js = self.server.request(self.server.web_port, "GET", "/stats.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"StatsView", stats_js)
         status, _, css = self.server.request(self.server.web_port, "GET", "/style.css")
         self.assertEqual(status, 200)
         self.assertIn(b".rail.is-open", css)
         self.assertIn(b".terminals.tiled", css)
         self.assertIn(b"scrollbar-width: none", css)
+        self.assertIn(b".stat-grid", css)
         self.assertIn(b"scrollback: 0", js)
 
     # ------------------------------------------------------------ opencode
@@ -200,6 +204,70 @@ class ApiTest(unittest.TestCase):
         status, _, stats = self.web_json("GET", "/api/stats")
         self.assertEqual(status, 200)
         self.assertIn("sessions_total", stats["stats"])
+
+    def test_metrics_endpoint_scope_and_history(self):
+        alice_token, alice_key = self.server.create_user_key("alice")
+        bob_token, bob_key = self.server.create_user_key("bob")
+        alice = self.server.app.db.user_by_username("alice")
+        bob = self.server.app.db.user_by_username("bob")
+        for user, key, name in ((alice, alice_key, "work"), (bob, bob_key, "desk")):
+            self.server.app.db.upsert_session(
+                session_id=f"s_{name}",
+                user_id=user["id"],
+                api_key_id=key["id"],
+                name=name,
+                hostname="host",
+                cwd="/tmp",
+                model="m",
+                agent_id=f"a_{name}",
+            )
+        for token in (alice_token, bob_token):
+            status, _, _ = self.server.api_json(
+                "POST",
+                "/v1/messages",
+                token,
+                body={"model": "x", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+            )
+            self.assertEqual(status, 200)
+        self.server.app.metrics_tick(force=True)
+
+        status, _, data = self.web_json("GET", "/api/metrics?window=3600")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["scope"], "admin")
+        self.assertEqual(data["window_seconds"], 3600)
+        self.assertEqual(data["step_seconds"], 60)
+        self.assertGreaterEqual(data["live"]["gateway"]["requests"], 2)
+        self.assertGreater(data["live"]["gateway"]["tokens"]["input"], 0)
+        self.assertEqual(
+            {row["user"] for row in data["live"]["gateway"]["by_key"]},
+            {"alice", "bob"},
+        )
+        self.assertEqual(
+            {row["user"] for row in data["live"]["sessions"]},
+            {"alice", "bob"},
+        )
+        self.assertTrue(data["history"]["gateway"])
+        self.assertTrue(data["history"]["instance"])
+        self.assertIn("version", data["live"]["process"])
+        self.assertGreater(data["history"]["gateway"][0]["requests"], 0)
+
+        status, _, mine = self.web_json(
+            "GET", "/api/metrics", extra={"Remote-Groups": "users"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(mine["scope"], "self")
+        self.assertEqual(
+            {row["user"] for row in mine["live"]["gateway"]["by_key"]}, {"alice"}
+        )
+        self.assertEqual(
+            {row["user"] for row in mine["live"]["sessions"]}, {"alice"}
+        )
+        self.assertEqual(
+            sum(point["requests"] for point in mine["history"]["gateway"]), 1
+        )
+
+        status, _, _ = self.api_json("GET", "/api/metrics", alice_token)
+        self.assertEqual(status, 404)
 
     # ------------------------------------------------------------------ API
     def test_api_requires_key(self):

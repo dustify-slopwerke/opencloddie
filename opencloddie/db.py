@@ -11,7 +11,7 @@ from typing import Any
 from .crypto import hash_api_key, key_prefix, new_api_key
 from .util import iso, new_short_id, safe_username, utcnow
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -59,11 +59,50 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+CREATE TABLE IF NOT EXISTS usage_minutes (
+    bucket INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    api_key_id TEXT NOT NULL,
+    api_key_name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    requests INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 0,
+    client_errors INTEGER NOT NULL DEFAULT 0,
+    server_errors INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket, api_key_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_user_bucket ON usage_minutes(user_id, bucket);
+CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_minutes(bucket);
+CREATE TABLE IF NOT EXISTS instance_minutes (
+    bucket INTEGER PRIMARY KEY,
+    sessions_online INTEGER NOT NULL DEFAULT 0,
+    sessions_total INTEGER NOT NULL DEFAULT 0,
+    agents INTEGER NOT NULL DEFAULT 0,
+    viewers INTEGER NOT NULL DEFAULT 0,
+    rss_bytes INTEGER,
+    cpu_seconds REAL,
+    threads INTEGER,
+    db_bytes INTEGER
+);
 """
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _row_value(row: Any, name: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(name, 0)
+    return getattr(row, name, 0)
 
 
 class Database:
@@ -92,6 +131,16 @@ class Database:
                     "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+            else:
+                try:
+                    stored = int(row["value"])
+                except (TypeError, ValueError):
+                    stored = 0
+                if stored < SCHEMA_VERSION:
+                    self.conn.execute(
+                        "UPDATE meta SET value=? WHERE key='schema_version'",
+                        (str(SCHEMA_VERSION),),
+                    )
 
     # ---------------------------------------------------------------- users
     def ensure_user(
@@ -365,6 +414,219 @@ class Database:
                 "DELETE FROM sessions WHERE online=0 AND last_seen_at < ?", (cutoff,)
             )
         return cur.rowcount
+
+    # ------------------------------------------------------------- metrics
+    def add_usage_rows(self, bucket: int, rows: list[Any]) -> None:
+        if not rows:
+            return
+        values = [
+            (
+                int(bucket),
+                int(_row_value(row, "user_id")),
+                str(_row_value(row, "key_id")),
+                str(_row_value(row, "key_name")),
+                str(_row_value(row, "username")),
+                str(_row_value(row, "model")),
+                int(_row_value(row, "requests")),
+                int(_row_value(row, "ok")),
+                int(_row_value(row, "client_errors")),
+                int(_row_value(row, "server_errors")),
+                int(_row_value(row, "rate_limited")),
+                int(_row_value(row, "bytes_in")),
+                int(_row_value(row, "bytes_out")),
+                int(_row_value(row, "tokens_in")),
+                int(_row_value(row, "tokens_out")),
+                int(_row_value(row, "cache_read_tokens")),
+                int(_row_value(row, "cache_creation_tokens")),
+            )
+            for row in rows
+        ]
+        with self.lock, self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO usage_minutes(
+                    bucket, user_id, api_key_id, api_key_name, username, model,
+                    requests, ok, client_errors, server_errors, rate_limited,
+                    bytes_in, bytes_out, tokens_in, tokens_out,
+                    cache_read_tokens, cache_creation_tokens)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(bucket, api_key_id, model) DO UPDATE SET
+                    user_id=excluded.user_id,
+                    api_key_name=excluded.api_key_name,
+                    username=excluded.username,
+                    requests=usage_minutes.requests + excluded.requests,
+                    ok=usage_minutes.ok + excluded.ok,
+                    client_errors=usage_minutes.client_errors + excluded.client_errors,
+                    server_errors=usage_minutes.server_errors + excluded.server_errors,
+                    rate_limited=usage_minutes.rate_limited + excluded.rate_limited,
+                    bytes_in=usage_minutes.bytes_in + excluded.bytes_in,
+                    bytes_out=usage_minutes.bytes_out + excluded.bytes_out,
+                    tokens_in=usage_minutes.tokens_in + excluded.tokens_in,
+                    tokens_out=usage_minutes.tokens_out + excluded.tokens_out,
+                    cache_read_tokens=usage_minutes.cache_read_tokens + excluded.cache_read_tokens,
+                    cache_creation_tokens=usage_minutes.cache_creation_tokens + excluded.cache_creation_tokens
+                """,
+                values,
+            )
+
+    def usage_series(
+        self, since: int, step: int, user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        step = max(1, int(step))
+        sql = """
+            SELECT (bucket / ?) * ? AS t,
+                   SUM(requests) AS requests,
+                   SUM(ok) AS ok,
+                   SUM(client_errors) AS client_errors,
+                   SUM(server_errors) AS server_errors,
+                   SUM(rate_limited) AS rate_limited,
+                   SUM(bytes_in) AS bytes_in,
+                   SUM(bytes_out) AS bytes_out,
+                   SUM(tokens_in) AS tokens_in,
+                   SUM(tokens_out) AS tokens_out,
+                   SUM(cache_read_tokens) AS cache_read_tokens,
+                   SUM(cache_creation_tokens) AS cache_creation_tokens
+            FROM usage_minutes WHERE bucket >= ?
+        """
+        args: list[Any] = [step, step, int(since)]
+        if user_id is not None:
+            sql += " AND user_id=?"
+            args.append(user_id)
+        sql += " GROUP BY t ORDER BY t"
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+        series: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["errors"] = int(
+                item["client_errors"] + item["server_errors"] + item["rate_limited"]
+            )
+            series.append(item)
+        return series
+
+    def add_instance_sample(self, bucket: int, sample: dict[str, Any]) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO instance_minutes(
+                    bucket, sessions_online, sessions_total, agents, viewers,
+                    rss_bytes, cpu_seconds, threads, db_bytes)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(bucket) DO UPDATE SET
+                    sessions_online=excluded.sessions_online,
+                    sessions_total=excluded.sessions_total,
+                    agents=excluded.agents,
+                    viewers=excluded.viewers,
+                    rss_bytes=excluded.rss_bytes,
+                    cpu_seconds=excluded.cpu_seconds,
+                    threads=excluded.threads,
+                    db_bytes=excluded.db_bytes
+                """,
+                (
+                    int(bucket),
+                    int(sample.get("sessions_online") or 0),
+                    int(sample.get("sessions_total") or 0),
+                    int(sample.get("agents") or 0),
+                    int(sample.get("viewers") or 0),
+                    sample.get("rss_bytes"),
+                    sample.get("cpu_seconds"),
+                    sample.get("threads"),
+                    sample.get("db_bytes"),
+                ),
+            )
+
+    def instance_series(self, since: int, step: int) -> list[dict[str, Any]]:
+        step = max(1, int(step))
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT (bucket / ?) * ? AS t,
+                       AVG(sessions_online) AS sessions_online,
+                       AVG(sessions_total) AS sessions_total,
+                       AVG(agents) AS agents,
+                       AVG(viewers) AS viewers,
+                       AVG(rss_bytes) AS rss_bytes,
+                       MAX(cpu_seconds) AS cpu_seconds,
+                       AVG(threads) AS threads,
+                       AVG(db_bytes) AS db_bytes
+                FROM instance_minutes WHERE bucket >= ?
+                GROUP BY t ORDER BY t
+                """,
+                (step, step, int(since)),
+            ).fetchall()
+        series: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            for name in (
+                "sessions_online",
+                "sessions_total",
+                "agents",
+                "viewers",
+                "rss_bytes",
+                "threads",
+                "db_bytes",
+            ):
+                value = item.get(name)
+                item[name] = int(round(value)) if value is not None else None
+            series.append(item)
+        return series
+
+    def purge_metrics(self, cutoff_bucket: int) -> None:
+        with self.lock, self.conn:
+            self.conn.execute("DELETE FROM usage_minutes WHERE bucket < ?", (int(cutoff_bucket),))
+            self.conn.execute(
+                "DELETE FROM instance_minutes WHERE bucket < ?", (int(cutoff_bucket),)
+            )
+
+    def instance_counts(self) -> dict[str, int]:
+        with self.lock:
+            sessions_online = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE online=1"
+            ).fetchone()["n"]
+            sessions_total = self.conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
+            users = self.conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+            api_keys = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM api_keys WHERE revoked_at IS NULL"
+            ).fetchone()["n"]
+        return {
+            "sessions_online": sessions_online,
+            "sessions_total": sessions_total,
+            "users": users,
+            "api_keys_active": api_keys,
+        }
+
+    def list_sessions_scoped(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        query = (
+            "SELECT s.*, u.username AS username FROM sessions s "
+            "JOIN users u ON u.id = s.user_id"
+        )
+        args: list[Any] = []
+        if user_id is not None:
+            query += " WHERE s.user_id=?"
+            args.append(user_id)
+        query += " ORDER BY s.created_at ASC, s.id ASC"
+        with self.lock:
+            rows = self.conn.execute(query, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_api_keys_scoped(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        query = (
+            "SELECT k.*, u.username AS username FROM api_keys k "
+            "JOIN users u ON u.id = k.user_id"
+        )
+        args: list[Any] = []
+        if user_id is not None:
+            query += " WHERE k.user_id=?"
+            args.append(user_id)
+        query += " ORDER BY k.created_at DESC"
+        with self.lock:
+            rows = self.conn.execute(query, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def db_size_bytes(self) -> int | None:
+        from .metrics import db_size_bytes
+
+        return db_size_bytes(self.path)
 
     def stats(self, user_id: int) -> dict[str, Any]:
         with self.lock:

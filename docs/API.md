@@ -235,6 +235,74 @@ require `X-OpenCloddie-Client: web`, a same-origin `Origin` (when present), and
 
 `{"ok":true,"stats":{"api_keys":2,"sessions_online":3,"sessions_total":5,"agents":3,"sessions":3}}`.
 
+### `GET /api/metrics?window=3600`
+
+Powers the Statistics view.  `window` is one of `3600` (default), `21600`,
+`86400`, or `604800` seconds, clamped to `metrics.retention_days`.  The server
+returns the requested (or nearest allowed) range and its resolution in
+`step_seconds` (1m / 5m / 15m / 1h).
+
+```json
+{"ok":true,"generated_at":"...","scope":"admin|self",
+ "window_seconds":3600,"step_seconds":60,
+ "live":{
+   "process":{"version":"0.3.0","uptime_seconds":9200,"pid":123,"python":"3.12.8",
+              "platform":"linux","threads":24,"open_fds":34,
+              "memory":{"rss_bytes":52428800,"vms_bytes":0,"peak_rss_bytes":0},
+              "cpu":{"user_seconds":1.2,"system_seconds":0.4},
+              "load":{"1m":0.3,"5m":0.2,"15m":0.1},
+              "io":{"read_bytes":0,"write_bytes":0},
+              "disk":{"total_bytes":0,"free_bytes":0},
+              "database":{"size_bytes":123456}},
+   "instance":{"sessions_online":1,"sessions_total":3,"agents":1,"viewers":0,
+               "users":2,"api_keys_active":2},
+   "gateway":{"since":"...","requests":42,"in_flight":0,"ok":40,
+              "client_errors":1,"server_errors":0,"rate_limited":1,
+              "bytes_in":1234,"bytes_out":5678,
+              "tokens":{"input":100,"output":50,"cache_read":0,"cache_creation":0},
+              "upstream_ms":{"avg":120.5,"p50":100,"p95":300,"max":900},
+              "by_status":{"200":40,"429":1,"502":1},
+              "by_model":[{"model":"...","requests":40,"errors":1,
+                           "bytes_in":0,"bytes_out":0,"tokens_in":0,"tokens_out":0}],
+              "by_key":[{"id":"k_...","name":"laptop","user":"alice","prefix":"ocd_sk_ab12…",
+                         "model":"...","revoked":false,"requests":40,"errors":1,
+                         "rate_limited":0,"bytes_in":0,"bytes_out":0,
+                         "tokens_in":0,"tokens_out":0,"last_used_at":"...",
+                         "rate":{"used":3,"limit":120,"remaining":117,
+                                 "reset_in_seconds":42}}]},
+   "sessions":[{"id":"s_...","name":"work","user":"alice","hostname":"laptop",
+                "cwd":"...","model":"...","online":true,"viewers":1,
+                "connected_at":"...","connected_seconds":300,"last_seen_at":"...",
+                "last_seen":"3s ago","terminal_bytes_in":10,"terminal_bytes_out":2000}],
+   "hub":{"agents":1,"sessions":1,"viewers":0,"agents_connected_total":4,
+          "agents_disconnected_total":3,"channels_opened_total":7,
+          "terminal_bytes_in_total":10,"terminal_bytes_out_total":2000}},
+ "history":{
+   "gateway":[{"t":1762690000,"requests":3,"ok":3,"client_errors":0,
+               "server_errors":0,"rate_limited":0,"bytes_in":10,"bytes_out":20,
+               "tokens_in":3,"tokens_out":4,"cache_read_tokens":0,
+               "cache_creation_tokens":0,"errors":0}],
+   "instance":[{"t":1762690000,"sessions_online":1,"sessions_total":3,
+                "agents":1,"viewers":0,"rss_bytes":0,"cpu_seconds":0,
+                "threads":0,"db_bytes":0}]}}
+```
+
+- **Live counters are process-lifetime** and reset on restart;
+  `history` is flushed to SQLite once per `metrics.sample_seconds` (default
+  60s) and retained for `metrics.retention_days` (default 7).  Sparse history
+  is normal: the UI fills missing buckets with zero.
+- **Scope:** members of `metrics.admin_groups` (default `["god"]`, injected by
+  the auth proxy) get `scope:"admin"` and every user's keys, sessions, and
+  usage history.  Everyone else gets `scope:"self"` and only their own keys,
+  sessions, and usage.  Process/instance health is always global, like
+  `/api/system`.
+- **Tokens** are parsed from non-stream JSON `usage` and from streamed
+  `message_start` / `message_delta` SSE events.  `count_tokens` is counted as a
+  request but has no usage block, so it adds no tokens.
+- Key tokens and OpenCode keys are never returned; only key ids, names, and
+  masked prefixes.
+- Served only by the web listener; the API listener returns 404.
+
 ### `GET /api/system`
 
 Version, uptime, URLs, model catalogue, upstream/auth style, hub counts.
@@ -304,9 +372,9 @@ Terminal WebSocket described above.
 
 ## Static assets
 
-`/`, `/index.html`, `/app.js`, `/style.css`, `/favicon.svg`, `/vendor/*`.
-Vendored xterm.js; no external CDN at runtime.  CSP is `default-src 'self'` with
-`connect-src` permitting same-origin WebSockets.
+`/`, `/index.html`, `/app.js`, `/stats.js`, `/style.css`, `/favicon.svg`,
+`/vendor/*`.  Vendored xterm.js; no external CDN at runtime.  CSP is
+`default-src 'self'` with `connect-src` permitting same-origin WebSockets.
 
 ## Rate limiting
 

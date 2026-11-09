@@ -67,7 +67,7 @@ headers/body and can emit JSON or SSE.
 | `test_client.py` | `opencloddie login/config/env/whoami/run/ls/stop` against a live test server with a fake Claude binary |
 | `test_version.py` | package/server/client versions match and use semver |
 
-65 tests.  Each test creates isolated temp configs/databases and ephemeral
+80 tests.  Each test creates isolated temp configs/databases and ephemeral
 ports; no fixed ports, no network, no reliance on the developer's state.
 
 ### Adding a test
@@ -142,13 +142,15 @@ Open `http://127.0.0.1:18787`, click the tab, type.  Stop with
 
 ## Database changes
 
-There is no migration framework in v0.2.  `Database._init_schema` runs
-`CREATE TABLE IF NOT EXISTS` and stores `schema_version=1` in `meta`.  If you
-add a column:
+There is no migration framework.  `Database._init_schema` runs
+`CREATE TABLE IF NOT EXISTS` and raises the stored `schema_version` to
+`SCHEMA_VERSION` (currently **2**) when it is lower.  Adding a whole table is
+automatic; adding a column still needs:
 
 1. bump `SCHEMA_VERSION`,
 2. read the stored version and apply idempotent `ALTER TABLE` statements,
-3. add a test that opens an old database,
+3. add a test that opens an old database (see
+   `test_metrics_schema_migrates_from_v1`),
 4. document the backup/rollback implications.
 
 ## CI
@@ -165,7 +167,7 @@ Keep CI offline-compatible.  The tests never call the real OpenCode endpoint.
 
 ## Release checklist
 
-- [ ] `make test` passes locally (65 tests).
+- [ ] `make test` passes locally (80 tests).
 - [ ] `docker build -f deploy/Dockerfile -t opencloddie:test .` succeeds.
 - [ ] Version bumped in `opencloddie/__init__.py` and the client's `VERSION`;
       `pyproject.toml` reads it dynamically, and `test_version.py` catches drift.
@@ -191,8 +193,8 @@ Keep CI offline-compatible.  The tests never call the real OpenCode endpoint.
 ## Known gaps / next steps
 
 - Multi-node agent routing.
-- Per-user session quotas and usage accounting.
+- Per-user session quotas and alerts on the statistics counters.
 - A proper AEAD library for at-rest secrets.
-- Audit log table and metrics endpoint.
+- Audit log table.
 - Optional server-hosted sessions for users without a local machine.
 - Rotation tooling for `secrets.master` (currently rotate = re-enter keys).

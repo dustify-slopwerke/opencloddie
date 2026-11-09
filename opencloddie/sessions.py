@@ -16,10 +16,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from .auth import ApiIdentity
-from .util import iso, utcnow
+from .util import iso
 from .websocket import WSClosed
 
 log = logging.getLogger("opencloddie.agent")
@@ -53,6 +54,9 @@ class Channel:
                 pass
 
     def send_input(self, data: bytes) -> None:
+        with self.agent.hub.lock:
+            self.agent.bytes_in += len(data)
+            self.agent.hub.terminal_bytes_in_total += len(data)
         self.agent.send_json({"t": "in", "ch": self.id, "data": base64.b64encode(data).decode("ascii")})
 
     def resize(self, cols: int, rows: int) -> None:
@@ -76,12 +80,16 @@ class AgentConnection:
     identity: ApiIdentity
     agent_id: str
     session_id: str = ""
+    name: str = ""
     hostname: str = ""
     last_seen: float = field(default_factory=time.time)
+    connected_at: float = field(default_factory=time.time)
     features: dict[str, bool] = field(default_factory=dict)
     channels: dict[int, Channel] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     alive: bool = True
+    bytes_in: int = 0
+    bytes_out: int = 0
     _counter: itertools.count = field(default_factory=lambda: itertools.count(1))
 
     def send_json(self, obj: dict[str, Any]) -> bool:
@@ -110,6 +118,8 @@ class AgentConnection:
                 raise AgentUnavailable("session agent is offline")
             channel = Channel(next(self._counter), self)
             self.channels[channel.id] = channel
+        with self.hub.lock:
+            self.hub.channels_opened_total += 1
         if not self.send_json({"t": "open", "ch": channel.id, "cols": int(cols), "rows": int(rows)}):
             self.close_channel(channel)
             raise AgentUnavailable("failed to reach the session agent")
@@ -135,6 +145,9 @@ class AgentConnection:
                     data = base64.b64decode(message.get("data", ""), validate=False)
                 except Exception:  # noqa: BLE001
                     return
+                self.bytes_out += len(data)
+                with self.hub.lock:
+                    self.hub.terminal_bytes_out_total += len(data)
                 channel.put("data", data)
             return
         if kind == "opened":
@@ -225,6 +238,11 @@ class AgentHub:
         self.lock = threading.RLock()
         self.agents: dict[str, AgentConnection] = {}
         self.by_session: dict[str, str] = {}
+        self.agents_connected_total = 0
+        self.agents_disconnected_total = 0
+        self.channels_opened_total = 0
+        self.terminal_bytes_in_total = 0
+        self.terminal_bytes_out_total = 0
 
     def attach(self, ws: Any, identity: ApiIdentity, hello: dict[str, Any]) -> AgentConnection:
         agent_id = _clean_text(hello.get("agent_id"), 64) or ""
@@ -253,6 +271,7 @@ class AgentHub:
 
         conn = AgentConnection(self, ws, identity, agent_id)
         conn.session_id = session_id
+        conn.name = name
         conn.hostname = hostname
         features = hello.get("features")
         if isinstance(features, dict):
@@ -278,17 +297,23 @@ class AgentHub:
             previous = self.by_session.get(session_id)
             self.agents[agent_id] = conn
             self.by_session[session_id] = agent_id
+            self.agents_connected_total += 1
             old_for_session = self.agents.get(previous) if previous and previous != agent_id else None
         if old_for_session is not None and old_for_session is not conn:
             old_for_session.close(reason="session was re-registered by a new agent")
         return conn
 
     def detach(self, conn: AgentConnection, reason: str = "") -> None:
+        removed = False
         with self.lock:
             if self.agents.get(conn.agent_id) is conn:
                 self.agents.pop(conn.agent_id, None)
+                removed = True
             if conn.session_id and self.by_session.get(conn.session_id) == conn.agent_id:
                 self.by_session.pop(conn.session_id, None)
+                removed = True
+            if removed:
+                self.agents_disconnected_total += 1
         if conn.session_id:
             self.app.db.mark_agent_offline(conn.agent_id)
 
@@ -333,20 +358,44 @@ class AgentHub:
 
     def stats(self) -> dict[str, int]:
         with self.lock:
-            return {"agents": len(self.agents), "sessions": len(self.by_session)}
+            return {
+                "agents": len(self.agents),
+                "sessions": len(self.by_session),
+                "viewers": sum(len(conn.channels) for conn in self.agents.values()),
+                "agents_connected_total": self.agents_connected_total,
+                "agents_disconnected_total": self.agents_disconnected_total,
+                "channels_opened_total": self.channels_opened_total,
+                "terminal_bytes_in_total": self.terminal_bytes_in_total,
+                "terminal_bytes_out_total": self.terminal_bytes_out_total,
+            }
 
-    def snapshot(self) -> list[dict[str, Any]]:
+    def snapshot(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        now = time.time()
         with self.lock:
             out = []
             for conn in self.agents.values():
+                if user_id is not None and conn.identity.user_id != user_id:
+                    continue
                 out.append(
                     {
                         "agent_id": conn.agent_id,
                         "session_id": conn.session_id,
+                        "name": conn.name,
                         "user": conn.identity.username,
                         "hostname": conn.hostname,
+                        "model": conn.identity.model,
                         "channels": len(conn.channels),
-                        "last_seen": iso(utcnow()),
+                        "viewers": len(conn.channels),
+                        "connected_at": iso(
+                            datetime.fromtimestamp(conn.connected_at, timezone.utc)
+                        ),
+                        "connected_seconds": max(0, int(now - conn.connected_at)),
+                        "last_seen_at": iso(
+                            datetime.fromtimestamp(conn.last_seen, timezone.utc)
+                        ),
+                        "last_seen": iso(datetime.fromtimestamp(conn.last_seen, timezone.utc)),
+                        "terminal_bytes_in": conn.bytes_in,
+                        "terminal_bytes_out": conn.bytes_out,
                     }
                 )
             return out

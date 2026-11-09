@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -6,6 +7,7 @@ from tests.harness import ROOT  # noqa: F401
 
 from opencloddie.crypto import new_master_secret
 from opencloddie.db import Database
+from opencloddie.metrics import UsageDelta
 
 
 class DatabaseTest(unittest.TestCase):
@@ -131,6 +133,135 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(stats["api_keys"], 1)
         self.assertEqual(stats["sessions_total"], 1)
         self.assertEqual(stats["sessions_online"], 0)
+
+
+    def test_metrics_schema_migrates_from_v1(self):
+        path = os.path.join(self.tmp, "old.db")
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+            "INSERT INTO meta VALUES('schema_version', '1');"
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(path, new_master_secret())
+        try:
+            tables = {
+                row[0]
+                for row in db.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("usage_minutes", tables)
+            self.assertIn("instance_minutes", tables)
+            version = db.conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()[0]
+            self.assertEqual(version, "2")
+        finally:
+            db.close()
+
+    def test_usage_history_aggregates_and_scopes(self):
+        alice = self.db.ensure_user("alice")
+        bob = self.db.ensure_user("bob")
+        alice_key, _ = self.db.create_api_key(alice["id"], "laptop", "m")
+        bob_key, _ = self.db.create_api_key(bob["id"], "desktop", "m")
+
+        self.db.add_usage_rows(120, [UsageDelta(
+            user_id=alice["id"], key_id=alice_key["id"], key_name="laptop",
+            username="alice", model="m", requests=1, ok=1,
+            bytes_in=10, bytes_out=20, tokens_in=3, tokens_out=4,
+        )])
+        # Same bucket/key/model is an upsert, not a second row.
+        self.db.add_usage_rows(120, [UsageDelta(
+            user_id=alice["id"], key_id=alice_key["id"], key_name="laptop",
+            username="alice", model="m", requests=1, ok=1,
+            bytes_in=5, bytes_out=6, tokens_in=1, tokens_out=2,
+        )])
+        self.db.add_usage_rows(180, [UsageDelta(
+            user_id=alice["id"], key_id=alice_key["id"], key_name="laptop",
+            username="alice", model="m", requests=1, client_errors=1,
+            bytes_in=1, bytes_out=2,
+        )])
+        self.db.add_usage_rows(120, [UsageDelta(
+            user_id=bob["id"], key_id=bob_key["id"], key_name="desktop",
+            username="bob", model="m", requests=1, ok=1,
+        )])
+
+        mine = self.db.usage_series(0, 60, alice["id"])
+        self.assertEqual(len(mine), 2)
+        self.assertEqual(mine[0]["t"], 120)
+        self.assertEqual(mine[0]["requests"], 2)
+        self.assertEqual(mine[0]["bytes_in"], 15)
+        self.assertEqual(mine[0]["bytes_out"], 26)
+        self.assertEqual(mine[0]["tokens_in"], 4)
+        self.assertEqual(mine[1]["errors"], 1)
+
+        everyone = self.db.usage_series(0, 60, None)
+        self.assertEqual(sum(row["requests"] for row in everyone), 4)
+
+        grouped = self.db.usage_series(0, 120, alice["id"])
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["t"], 120)
+        self.assertEqual(grouped[0]["requests"], 3)
+
+    def test_instance_history_and_purge(self):
+        self.db.add_instance_sample(120, {
+            "sessions_online": 1, "sessions_total": 2, "agents": 1,
+            "viewers": 0, "rss_bytes": 100, "cpu_seconds": 1.5,
+            "threads": 9, "db_bytes": 5,
+        })
+        # A forced flush in the same minute overwrites the sample.
+        self.db.add_instance_sample(120, {
+            "sessions_online": 3, "sessions_total": 4, "agents": 2,
+            "viewers": 1, "rss_bytes": 200, "cpu_seconds": 2.5,
+            "threads": 10, "db_bytes": 6,
+        })
+        self.db.add_instance_sample(180, {
+            "sessions_online": 1, "sessions_total": 4, "agents": 1,
+            "viewers": 0, "rss_bytes": 300, "cpu_seconds": 3.5,
+            "threads": 10, "db_bytes": 7,
+        })
+        series = self.db.instance_series(0, 60)
+        self.assertEqual(len(series), 2)
+        self.assertEqual(series[0]["sessions_online"], 3)
+        self.assertEqual(series[0]["rss_bytes"], 200)
+
+        grouped = self.db.instance_series(0, 120)
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["sessions_online"], 2)
+        self.assertEqual(grouped[0]["cpu_seconds"], 3.5)
+
+        self.db.purge_metrics(150)
+        self.assertEqual(len(self.db.instance_series(0, 60)), 1)
+        self.assertEqual(len(self.db.usage_series(0, 60)), 0)
+
+    def test_scoped_lists_and_instance_counts(self):
+        alice = self.db.ensure_user("alice")
+        bob = self.db.ensure_user("bob")
+        alice_key, _ = self.db.create_api_key(alice["id"], "a", "m")
+        bob_key, _ = self.db.create_api_key(bob["id"], "b", "m")
+        for user, key, name in ((alice, alice_key, "one"), (bob, bob_key, "two")):
+            self.db.upsert_session(
+                session_id=f"s_{name}", user_id=user["id"], api_key_id=key["id"],
+                name=name, hostname="host", cwd="/tmp", model="m",
+                agent_id=f"a_{name}",
+            )
+
+        self.assertEqual(len(self.db.list_sessions_scoped(alice["id"])), 1)
+        everyone = self.db.list_sessions_scoped(None)
+        self.assertEqual(len(everyone), 2)
+        self.assertTrue(all(row["username"] for row in everyone))
+
+        self.assertEqual(len(self.db.list_api_keys_scoped(alice["id"])), 1)
+        self.assertEqual(len(self.db.list_api_keys_scoped(None)), 2)
+
+        counts = self.db.instance_counts()
+        self.assertEqual(counts["users"], 2)
+        self.assertEqual(counts["api_keys_active"], 2)
+        self.assertEqual(counts["sessions_online"], 2)
+        self.assertEqual(counts["sessions_total"], 2)
 
 
 if __name__ == "__main__":

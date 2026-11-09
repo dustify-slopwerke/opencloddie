@@ -151,6 +151,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 closed = app.hub.watchdog()
                 if closed:
                     log.info("closed %d stale agent connection(s)", closed)
+                app.metrics_tick()
             except Exception:  # noqa: BLE001
                 log.exception("watchdog error")
 

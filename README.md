@@ -18,8 +18,9 @@ opencloddie is three things in one small, dependency-free service:
    viewer.  Detach with `Ctrl-b d`; the session keeps running and stays in the
    web UI.
 3. **A tabbed/tiled web app** (behind nginx + Authelia) to switch between all
-   your connected sessions, generate API keys, choose models, and manage your
-   OpenCode key.
+   your connected sessions, generate API keys, choose models, manage your
+   OpenCode key, and monitor gateway usage, tokens, sessions, and process
+   health in a Statistics view (with persisted 1h/6h/24h/7d history).
 
 No peak/off-peak heuristics: you pick the model, per API key, in the UI.
 
@@ -200,7 +201,7 @@ Details and the threat model: **[docs/SECURITY.md](docs/SECURITY.md)**.
 make test          # or ./scripts/test.sh
 ```
 
-65 tests cover crypto, config, DB, model routing, WebSocket framing, gateway
+80 tests cover crypto, config, DB, model routing, WebSocket framing, gateway
 header/stream behavior, the HTTP APIs, CSRF/auth, and two real end-to-end
 flows: client → tmux → agent → server → browser terminal, and the full
 `opencloddie` CLI.  Tests run offline against a fake OpenCode upstream; tmux
@@ -218,6 +219,7 @@ opencloddie/
   client/opencloddie         standalone client (first-run setup, tmux, agent)
   config.py  crypto.py  db.py  auth.py  models.py
   gateway.py                 Anthropic -> OpenCode Go proxy
+  metrics.py                 gateway/session/process counters + history flush
   websocket.py               stdlib RFC 6455 server/client
   sessions.py                agent hub + terminal channels
   httpd.py                   web + API listeners, terminal/agent WebSockets

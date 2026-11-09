@@ -198,6 +198,80 @@ class GatewayTest(unittest.TestCase):
         bad = self.server.app.gateway.test_opencode_key("oc_sk_bad", "deepseek-v4.1-flash")
         self.assertFalse(bad["ok"])
         self.assertEqual(bad["status"], 401)
+        # Settings → Test is not gateway traffic.
+        self.assertEqual(self.server.app.gateway.metrics.snapshot()["requests"], 0)
+
+    def test_metrics_records_bytes_and_tokens(self):
+        identity = self._identity()
+        body = {
+            "model": "x",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        payload = json.dumps(body).encode()
+        result = self.server.app.gateway.proxy(
+            identity, "/v1/messages", "", self._headers(), payload
+        )
+        response = result.read_all()
+        snapshot = self.server.app.gateway.metrics.snapshot(identity.user_id)
+        self.assertEqual(snapshot["requests"], 1)
+        self.assertEqual(snapshot["ok"], 1)
+        self.assertEqual(snapshot["in_flight"], 0)
+        self.assertEqual(snapshot["bytes_in"], len(payload))
+        self.assertEqual(snapshot["bytes_out"], len(response))
+        self.assertEqual(snapshot["tokens"]["input"], 3)
+        self.assertEqual(snapshot["tokens"]["output"], 1)
+        self.assertEqual(snapshot["by_status"], {"200": 1})
+        self.assertEqual(snapshot["by_key"][0]["id"], identity.key_id)
+
+    def test_metrics_stream_records_tokens_and_bytes(self):
+        identity = self._identity()
+        body = {
+            "model": "x",
+            "stream": True,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        result = self.server.app.gateway.proxy(
+            identity, "/v1/messages", "", self._headers(), json.dumps(body).encode()
+        )
+        data = b"".join(result.iter_bytes())
+        snapshot = self.server.app.gateway.metrics.snapshot(identity.user_id)
+        self.assertEqual(snapshot["requests"], 1)
+        self.assertEqual(snapshot["in_flight"], 0)
+        self.assertEqual(snapshot["bytes_out"], len(data))
+        self.assertEqual(snapshot["tokens"]["input"], 3)
+        self.assertEqual(snapshot["tokens"]["output"], 1)
+
+    def test_metrics_error_and_rate_limit(self):
+        missing = self._identity(opencode_key=None)
+        with self.assertRaises(GatewayError):
+            self.server.app.gateway.proxy(
+                missing,
+                "/v1/messages",
+                "",
+                self._headers(),
+                json.dumps({"messages": []}).encode(),
+            )
+        self.server.cfg["gateway"]["rate_limit_per_minute"] = 1
+        identity = self._identity(opencode_key="oc_sk_user_key")
+        body = json.dumps({"messages": []}).encode()
+        result = self.server.app.gateway.proxy(
+            identity, "/v1/messages", "", self._headers(), body
+        )
+        result.read_all()
+        with self.assertRaises(GatewayError) as ctx:
+            self.server.app.gateway.proxy(identity, "/v1/messages", "", self._headers(), body)
+        self.assertEqual(ctx.exception.status, 429)
+
+        snapshot = self.server.app.gateway.metrics.snapshot(identity.user_id)
+        self.assertEqual(snapshot["requests"], 3)
+        self.assertEqual(snapshot["ok"], 1)
+        self.assertEqual(snapshot["client_errors"], 1)
+        self.assertEqual(snapshot["rate_limited"], 1)
+        rates = self.server.app.gateway.rate_snapshot({identity.key_id})
+        self.assertEqual(rates[identity.key_id]["used"], 1)
+        self.assertEqual(rates[identity.key_id]["remaining"], 0)
 
 
 if __name__ == "__main__":

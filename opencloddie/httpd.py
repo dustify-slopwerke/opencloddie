@@ -33,6 +33,7 @@ from .auth import ApiIdentity, AuthError, WebIdentity, api_identity, web_identit
 from .config import APP_NAME
 from .crypto import decrypt_secret, encrypt_secret
 from .gateway import Gateway, GatewayError, error_body
+from .metrics import Metrics, process_snapshot
 from .models import context_tokens_for, model_ids, normalize_model
 from .sessions import AgentHub, AgentUnavailable
 from .util import (
@@ -63,6 +64,25 @@ STATIC_TYPES = {
 SAFE_STATIC = re.compile(r"^/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$")
 
 
+def _empty_key_metrics(key_id: str) -> dict[str, Any]:
+    return {
+        "id": key_id,
+        "name": "",
+        "user": "",
+        "model": "",
+        "requests": 0,
+        "errors": 0,
+        "rate_limited": 0,
+        "bytes_in": 0,
+        "bytes_out": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "last_used_at": None,
+    }
+
+
 class App:
     def __init__(self, cfg: dict[str, Any]):
         from .db import Database
@@ -71,9 +91,18 @@ class App:
         self.db = Database(cfg["database"]["path"], cfg["secrets"]["master"])
         self.db.mark_all_sessions_offline()
         self.db.purge_offline_sessions(90)
-        self.gateway = Gateway(cfg, self.db)
-        self.hub = AgentHub(self)
         self.started_at = time.time()
+        metrics_cfg = cfg.get("metrics") or {}
+        self.metrics = Metrics(
+            started_at=self.started_at,
+            sample_seconds=int(metrics_cfg.get("sample_seconds") or 60),
+            retention_days=int(metrics_cfg.get("retention_days") or 7),
+            admin_groups=list(metrics_cfg.get("admin_groups") or ["god"]),
+        )
+        self.db.purge_metrics(self.metrics.retention_cutoff())
+        self._metrics_lock = threading.Lock()
+        self.gateway = Gateway(cfg, self.db, self.metrics)
+        self.hub = AgentHub(self)
         self.web_root = Path(__file__).resolve().parent / "web"
         package_client = Path(__file__).resolve().parent / "client" / "opencloddie"
         repo_client = Path(__file__).resolve().parent.parent / "bin" / "opencloddie"
@@ -107,6 +136,48 @@ class App:
                 self.models, user.get("default_model"), self.default_model
             ),
         }
+
+    def is_metrics_admin(self, identity: WebIdentity) -> bool:
+        groups = set(identity.groups)
+        return any(group in groups for group in self.metrics.admin_groups)
+
+    def metrics_tick(self, force: bool = False) -> None:
+        """Flush live counters and one instance sample into SQLite if due."""
+        now = time.time()
+        with self._metrics_lock:
+            if not force and not self.metrics.flush_due(now):
+                return
+            rows = self.metrics.pending()
+            bucket = int(now // 60 * 60)
+            if rows:
+                self.db.add_usage_rows(bucket, rows)
+            counts = self.db.instance_counts()
+            hub = self.hub.stats()
+            proc = process_snapshot(
+                started_at=self.started_at, db_path=self.cfg["database"]["path"]
+            )
+            cpu = proc.get("cpu") or {}
+            self.db.add_instance_sample(
+                bucket,
+                {
+                    "sessions_online": counts["sessions_online"],
+                    "sessions_total": counts["sessions_total"],
+                    "agents": hub.get("agents", 0),
+                    "viewers": hub.get("viewers", 0),
+                    "rss_bytes": (proc.get("memory") or {}).get("rss_bytes"),
+                    "cpu_seconds": round(
+                        float(cpu.get("user_seconds") or 0)
+                        + float(cpu.get("system_seconds") or 0),
+                        3,
+                    ),
+                    "threads": proc.get("threads"),
+                    "db_bytes": (proc.get("database") or {}).get("size_bytes"),
+                },
+            )
+            self.metrics.mark_flushed(now)
+            if self.metrics.purge_due(now):
+                self.db.purge_metrics(self.metrics.retention_cutoff(now))
+                self.metrics.mark_purged(now)
 
 
 class OpenCloddieHTTPServer(ThreadingHTTPServer):
@@ -369,6 +440,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/vendor/") or path in (
             "/app.js",
+            "/stats.js",
             "/style.css",
             "/favicon.svg",
             "/manifest.webmanifest",
@@ -454,6 +526,9 @@ class Handler(BaseHTTPRequestHandler):
                     "hub": app.hub.stats(),
                 },
             )
+
+        if path == "/api/metrics" and method in ("GET", "HEAD"):
+            return self._send_json(200, self._metrics_payload(identity))
 
         if path == "/api/opencode-key":
             if method in ("PUT", "POST"):
@@ -577,6 +652,119 @@ class Handler(BaseHTTPRequestHandler):
             return self._web_terminal_ws(session)
 
         raise AuthError(404, "not found", "not_found")
+
+    def _metrics_payload(self, identity: WebIdentity) -> dict[str, Any]:
+        app = self.app
+        app.metrics_tick()
+        admin = app.is_metrics_admin(identity)
+        scope_user = None if admin else identity.user_id
+
+        windows = {3600: 60, 21600: 300, 86400: 900, 604800: 3600}
+        try:
+            requested = int((self._query().get("window") or ["3600"])[0])
+        except (TypeError, ValueError):
+            requested = 3600
+        max_window = app.metrics.retention_days * 86400
+        allowed = [value for value in windows if value <= max_window] or [3600]
+        window = requested if requested in allowed else (3600 if 3600 in allowed else max(allowed))
+        step = windows[window]
+        now = time.time()
+        since = int(now) - window
+
+        counts = app.db.instance_counts()
+        hub_stats = app.hub.stats()
+        process = process_snapshot(
+            started_at=app.started_at, db_path=app.cfg["database"]["path"]
+        )
+        process["version"] = VERSION
+        gateway = app.metrics.snapshot(scope_user)
+        gateway["rate_limit"] = {
+            "limit_per_minute": int(app.cfg["gateway"].get("rate_limit_per_minute") or 0),
+            "window_seconds": 60,
+        }
+
+        live_keys = {row["id"]: row for row in gateway["by_key"]}
+        key_rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for key in app.db.list_api_keys_scoped(scope_user):
+            row = live_keys.get(key["id"]) or _empty_key_metrics(key["id"])
+            row.update(
+                {
+                    "name": key["name"],
+                    "user": key.get("username") or "",
+                    "prefix": key["prefix"],
+                    "model": key["model"],
+                    "revoked": bool(key.get("revoked_at")),
+                    "created_at": key.get("created_at"),
+                    "last_used_at": key.get("last_used_at") or row.get("last_used_at"),
+                }
+            )
+            key_rows.append(row)
+            seen.add(key["id"])
+        for key_id, row in live_keys.items():
+            if key_id not in seen:
+                key_rows.append(row)
+        rates = app.gateway.rate_snapshot({row["id"] for row in key_rows})
+        for row in key_rows:
+            row["rate"] = rates.get(row["id"]) or {
+                "used": 0,
+                "limit": 0,
+                "remaining": 0,
+                "reset_in_seconds": 0,
+            }
+        key_rows.sort(key=lambda row: (-row["requests"], row["name"]))
+        gateway["by_key"] = key_rows
+
+        hub_items = {item["session_id"]: item for item in app.hub.snapshot(scope_user)}
+        sessions: list[dict[str, Any]] = []
+        for row in app.db.list_sessions_scoped(scope_user):
+            item = hub_items.get(row["id"])
+            last_seen_at = (item or {}).get("last_seen_at") or row.get("last_seen_at")
+            sessions.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "user": row.get("username") or "",
+                    "hostname": row.get("hostname") or "",
+                    "cwd": row.get("cwd") or "",
+                    "model": row.get("model") or "",
+                    "online": item is not None,
+                    "viewers": item["viewers"] if item else 0,
+                    "connected_at": item["connected_at"] if item else None,
+                    "connected_seconds": item["connected_seconds"] if item else None,
+                    "last_seen_at": last_seen_at,
+                    "last_seen": human_age(last_seen_at),
+                    "terminal_bytes_in": item["terminal_bytes_in"] if item else 0,
+                    "terminal_bytes_out": item["terminal_bytes_out"] if item else 0,
+                }
+            )
+        sessions.sort(key=lambda item: (not item["online"], item["name"]))
+
+        return {
+            "ok": True,
+            "generated_at": iso(),
+            "scope": "admin" if admin else "self",
+            "window_seconds": window,
+            "step_seconds": step,
+            "live": {
+                "process": process,
+                "instance": {
+                    "sessions_online": counts["sessions_online"],
+                    "sessions_total": counts["sessions_total"],
+                    "agents": hub_stats.get("agents", 0),
+                    "viewers": hub_stats.get("viewers", 0),
+                    "users": counts["users"],
+                    "api_keys_active": counts["api_keys_active"],
+                },
+                "gateway": gateway,
+                "sessions": sessions,
+                "hub": hub_stats,
+            },
+            "history": {
+                "gateway": app.db.usage_series(since, step, scope_user),
+                "instance": app.db.instance_series(since, step),
+            },
+        }
 
     def _public_key(self, row: dict[str, Any]) -> dict[str, Any]:
         return {

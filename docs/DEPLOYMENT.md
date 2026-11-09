@@ -129,6 +129,9 @@ Fields not covered in deploy/README:
 | `gateway.max_body_bytes` | 32 MiB | request cap |
 | `gateway.allow_client_model_override` | false | honor known model ids from the client |
 | `gateway.user_agent` | `opencloddie-gateway/0.1` | used when the client sent none |
+| `metrics.sample_seconds` | 60 | how often live counters are flushed to SQLite |
+| `metrics.retention_days` | 7 | per-minute statistics history to keep |
+| `metrics.admin_groups` | `["god"]` | proxy groups that see all users' usage |
 
 Environment overrides: `OPENCLODDIE_MASTER_SECRET`, `OPENCLODDIE_WEB_HOST`,
 `OPENCLODDIE_WEB_PORT`, `OPENCLODDIE_API_HOST`, `OPENCLODDIE_API_PORT`,

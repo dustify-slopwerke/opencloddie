@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from .auth import ApiIdentity
 from .crypto import decrypt_secret
+from .metrics import SSEUsageParser, usage_from_json
 from .models import find_model, model_ids
 from .util import json_dumps
 
@@ -84,35 +85,75 @@ class ProxyResult:
     stream: Iterator[bytes] | None = None
     model: str = ""
     request_id: str = ""
+    metric_token: Any = field(default=None, repr=False)
+    metrics: Any = field(default=None, repr=False)
+    usage_parser: SSEUsageParser | None = field(default=None, repr=False)
+    bytes_out: int = 0
+    upstream_ms: float = 0.0
+    _metrics_done: bool = field(default=False, repr=False)
     _close: Callable[[], None] = field(default=lambda: None, repr=False)
 
     @property
     def is_stream(self) -> bool:
         return self.stream is not None
 
+    def finish_metrics(self) -> None:
+        """Record this request exactly once, after any body/stream completes."""
+        if self._metrics_done or self.metrics is None or self.metric_token is None:
+            return
+        self._metrics_done = True
+        usage: dict[str, int] = {}
+        if self.usage_parser is not None:
+            usage = self.usage_parser.usage()
+        if not usage and self.body is not None:
+            usage = usage_from_json(self.body)
+        if self.body is not None:
+            self.bytes_out = max(self.bytes_out, len(self.body))
+        self.metrics.finish(
+            self.metric_token,
+            self.status,
+            bytes_out=self.bytes_out,
+            upstream_ms=self.upstream_ms,
+            **usage,
+        )
+
     def iter_bytes(self) -> Iterator[bytes]:
         if self.stream is None:
-            if self.body:
-                yield self.body
+            try:
+                if self.body:
+                    yield self.body
+            finally:
+                self.finish_metrics()
             return
         try:
-            yield from self.stream
+            for chunk in self.stream:
+                self.bytes_out += len(chunk)
+                if self.usage_parser is not None:
+                    self.usage_parser.feed(chunk)
+                yield chunk
         finally:
+            self.finish_metrics()
             self.close()
 
     def read_all(self, limit: int = 64 * 1024 * 1024) -> bytes:
         if self.body is not None:
+            self.bytes_out = max(self.bytes_out, len(self.body))
+            self.finish_metrics()
             return self.body[:limit]
         chunks: list[bytes] = []
         size = 0
-        for chunk in self.iter_bytes():
-            size += len(chunk)
-            if size > limit:
-                raise GatewayError(502, "upstream response too large", "api_error")
-            chunks.append(chunk)
+        try:
+            for chunk in self.iter_bytes():
+                size += len(chunk)
+                if size > limit:
+                    raise GatewayError(502, "upstream response too large", "api_error")
+                chunks.append(chunk)
+        finally:
+            self.finish_metrics()
         return b"".join(chunks)
 
     def close(self) -> None:
+        self.finish_metrics()
         try:
             self._close()
         except Exception:  # noqa: BLE001
@@ -142,9 +183,14 @@ def _forward_headers(headers: Any) -> dict[str, str]:
 
 
 class Gateway:
-    def __init__(self, cfg: dict[str, Any], db: Any):
+    def __init__(self, cfg: dict[str, Any], db: Any, metrics: Any = None):
         self.cfg = cfg
         self.db = db
+        if metrics is None:
+            from .metrics import Metrics
+
+            metrics = Metrics(started_at=time.time())
+        self.metrics = metrics
         self.gateway_cfg = cfg["gateway"]
         self.models = cfg["gateway"]["models"]
         self.model_ids = set(model_ids(self.models))
@@ -185,6 +231,30 @@ class Gateway:
                 )
             bucket.append(now)
 
+    def rate_snapshot(self, key_ids: set[str] | None = None) -> dict[str, dict[str, int]]:
+        """Read-only view of the sliding-window rate limit for the given keys."""
+        limit = int(self.gateway_cfg.get("rate_limit_per_minute") or 0)
+        now = time.time()
+        out: dict[str, dict[str, int]] = {}
+        with self._rate_lock:
+            ids = list(self._rate.keys()) if key_ids is None else list(key_ids)
+            for key_id in ids:
+                bucket = self._rate.get(key_id)
+                if bucket is not None:
+                    while bucket and now - bucket[0] > 60:
+                        bucket.popleft()
+                used = len(bucket) if bucket is not None else 0
+                resets = 0
+                if bucket:
+                    resets = int(max(0.0, 60.0 - (now - bucket[0])))
+                out[key_id] = {
+                    "used": used,
+                    "limit": max(0, limit),
+                    "remaining": max(0, limit - used) if limit > 0 else 0,
+                    "reset_in_seconds": resets,
+                }
+        return out
+
     def opencode_key(self, identity: ApiIdentity) -> str:
         encrypted = identity.opencode_key_enc or self.db.user_secret(identity.user_id)
         if not encrypted:
@@ -215,82 +285,107 @@ class Gateway:
         request_headers: Any,
         body: bytes,
     ) -> ProxyResult:
-        self.rate_limit(identity)
+        token = self.metrics.begin(
+            user_id=identity.user_id,
+            key_id=identity.key_id,
+            key_name=identity.key_name,
+            username=identity.username,
+            bytes_in=len(body),
+        )
         try:
-            payload = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise GatewayError(400, "request body must be valid JSON") from exc
-        if not isinstance(payload, dict):
-            raise GatewayError(400, "request body must be a JSON object")
+            self.rate_limit(identity)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise GatewayError(400, "request body must be valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise GatewayError(400, "request body must be a JSON object")
 
-        requested = str(payload.get("model") or "")
-        model = self.resolve_model(identity, requested)
-        payload["model"] = model
-        new_body = json_dumps(payload)
+            requested = str(payload.get("model") or "")
+            model = self.resolve_model(identity, requested)
+            self.metrics.set_model(token, model)
+            payload["model"] = model
+            new_body = json_dumps(payload)
 
-        opencode_key = self.opencode_key(identity)
-        headers = _forward_headers(request_headers)
-        headers["Accept-Encoding"] = "identity"
-        headers.setdefault("User-Agent", str(self.gateway_cfg.get("user_agent") or "opencloddie"))
+            opencode_key = self.opencode_key(identity)
+            headers = _forward_headers(request_headers)
+            headers["Accept-Encoding"] = "identity"
+            headers.setdefault(
+                "User-Agent", str(self.gateway_cfg.get("user_agent") or "opencloddie")
+            )
 
-        session_id = (
-            _first_header(request_headers, "X-Claude-Code-Session-Id")
-            or _first_header(request_headers, "x-opencode-session")
-        )
-        if not session_id:
-            # Stable per API key so prompt caching has an affinity key.
-            session_id = "opencloddie-" + hashlib.sha256(
-                f"{identity.user_id}:{identity.key_id}".encode()
-            ).hexdigest()[:32]
-        headers["x-opencode-session"] = session_id
+            session_id = (
+                _first_header(request_headers, "X-Claude-Code-Session-Id")
+                or _first_header(request_headers, "x-opencode-session")
+            )
+            if not session_id:
+                # Stable per API key so prompt caching has an affinity key.
+                session_id = "opencloddie-" + hashlib.sha256(
+                    f"{identity.user_id}:{identity.key_id}".encode()
+                ).hexdigest()[:32]
+            headers["x-opencode-session"] = session_id
 
-        if self.gateway_cfg.get("auth_style") == "x-api-key":
-            headers.pop("Authorization", None)
-            headers["x-api-key"] = opencode_key
-        else:
-            headers.pop("x-api-key", None)
-            headers["Authorization"] = f"Bearer {opencode_key}"
+            if self.gateway_cfg.get("auth_style") == "x-api-key":
+                headers.pop("Authorization", None)
+                headers["x-api-key"] = opencode_key
+            else:
+                headers.pop("x-api-key", None)
+                headers["Authorization"] = f"Bearer {opencode_key}"
 
-        path = self.upstream_base + suffix
-        if query:
-            path += "?" + query
+            path = self.upstream_base + suffix
+            if query:
+                path += "?" + query
 
-        request_id = "req_" + secrets.token_hex(8)
-        result = self._request_once(headers, new_body, path, model, request_id)
+            request_id = "req_" + secrets.token_hex(8)
+            started = time.perf_counter()
+            result = self._request_once(headers, new_body, path, model, request_id)
+            upstream_ms = (time.perf_counter() - started) * 1000.0
 
-        fallback = str(self.gateway_cfg.get("fallback_model") or "")
-        if (
-            result.status in RETRYABLE_STATUS
-            and fallback
-            and fallback != model
-            and find_model(self.models, fallback)
-        ):
-            log.warning(
-                "upstream %s for model %s; retrying once with fallback %s",
-                result.status,
+            fallback = str(self.gateway_cfg.get("fallback_model") or "")
+            if (
+                result.status in RETRYABLE_STATUS
+                and fallback
+                and fallback != model
+                and find_model(self.models, fallback)
+            ):
+                log.warning(
+                    "upstream %s for model %s; retrying once with fallback %s",
+                    result.status,
+                    model,
+                    fallback,
+                )
+                result.close()
+                retry_payload = dict(payload)
+                retry_payload["model"] = fallback
+                started = time.perf_counter()
+                result = self._request_once(
+                    headers, json_dumps(retry_payload), path, fallback, request_id
+                )
+                upstream_ms = (time.perf_counter() - started) * 1000.0
+                model = fallback
+                self.metrics.set_model(token, model)
+
+            result.model = model
+            result.request_id = request_id
+            result.metrics = self.metrics
+            result.metric_token = token
+            result.upstream_ms = upstream_ms
+            log.info(
+                "gateway user=%s key=%s model=%s status=%s stream=%s request_id=%s",
+                identity.username,
+                identity.key_name,
                 model,
-                fallback,
+                result.status,
+                result.is_stream,
+                request_id,
             )
-            result.close()
-            retry_payload = dict(payload)
-            retry_payload["model"] = fallback
-            result = self._request_once(
-                headers, json_dumps(retry_payload), path, fallback, request_id
-            )
-            model = fallback
-
-        result.model = model
-        result.request_id = request_id
-        log.info(
-            "gateway user=%s key=%s model=%s status=%s stream=%s request_id=%s",
-            identity.username,
-            identity.key_name,
-            model,
-            result.status,
-            result.is_stream,
-            request_id,
-        )
-        return result
+            return result
+        except GatewayError as exc:
+            self.metrics.finish(token, exc.status, rate_limited=exc.status == 429)
+            raise
+        except Exception:
+            self.metrics.finish(token, 500)
+            raise
 
     def _request_once(
         self,
@@ -391,6 +486,7 @@ class Gateway:
             stream=iterator(),
             model=model,
             request_id=request_id,
+            usage_parser=SSEUsageParser(),
             _close=close,
         )
 

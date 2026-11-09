@@ -55,6 +55,12 @@ nginx's `auth_request` calls Authelia and sets `Remote-User`,
 3. Validates the username (`[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}`) and upserts a
    user row; groups are stored for future authorization use.
 
+The Statistics view uses the forwarded groups for one authorization decision:
+members of `metrics.admin_groups` (default `["god"]`) see every user's key
+names, session names, and aggregate usage; everyone else sees only their own.
+It never returns API-key tokens, OpenCode keys, message content, or terminal
+bytes — only counters, names, masked key prefixes, and process health.
+
 It does **not** implement login, passwords, MFA, or sessions.  Authelia owns
 those.  In production set `web.dev_user = ""`.
 

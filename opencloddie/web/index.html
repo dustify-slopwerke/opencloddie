@@ -35,6 +35,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 2.5L7 14"/><path d="M12.5 14H17"/></svg>
           <span>Sessions</span>
         </button>
+        <button class="nav-item" data-view="stats">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M8 16v-5M12 16V8M16 16v-3M20 16V6"/></svg>
+          <span>Statistics</span>
+        </button>
         <button class="nav-item" data-view="keys">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="4.5"/><path d="M13 12h8M18 12v3M21 12v2"/></svg>
           <span>API keys</span>
@@ -122,6 +126,78 @@
           <span class="statusbar-item statusbar-hint" id="status-hint"></span>
           <span class="statusbar-item" id="status-server"></span>
         </footer>
+      </section>
+
+      <section class="view" id="view-stats" hidden>
+        <div class="content stats-content">
+          <div class="stats-toolbar">
+            <div class="seg" id="stats-range" role="group" aria-label="History range">
+              <button class="seg-btn is-active" type="button" data-window="3600" aria-pressed="true">1h</button>
+              <button class="seg-btn" type="button" data-window="21600" aria-pressed="false">6h</button>
+              <button class="seg-btn" type="button" data-window="86400" aria-pressed="false">24h</button>
+              <button class="seg-btn" type="button" data-window="604800" aria-pressed="false">7d</button>
+            </div>
+            <span class="badge" id="stats-scope">my usage</span>
+            <span class="spacer"></span>
+            <span class="muted stats-updated" id="stats-updated" role="status"></span>
+          </div>
+
+          <div class="callout error-callout" id="stats-error" hidden></div>
+          <div class="stat-grid" id="stats-tiles"></div>
+
+          <div class="stats-cols">
+            <section class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Gateway requests</h2>
+                  <p class="muted" id="chart-gateway-sub">Persisted history</p>
+                </div>
+              </div>
+              <div id="chart-gateway" class="chart-host" tabindex="0" role="img" aria-label="Gateway requests over time"></div>
+              <details class="chart-table"><summary>Table view</summary><div id="chart-gateway-table"></div></details>
+            </section>
+            <section class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Sessions online</h2>
+                  <p class="muted" id="chart-sessions-sub">Sampled from the instance</p>
+                </div>
+              </div>
+              <div id="chart-sessions" class="chart-host" tabindex="0" role="img" aria-label="Sessions online over time"></div>
+              <details class="chart-table"><summary>Table view</summary><div id="chart-sessions-table"></div></details>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Gateway usage</h2>
+                <p class="muted">Live counters since the server started; history above is persisted every minute.</p>
+              </div>
+            </div>
+            <div id="stats-gateway"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Session activity</h2>
+                <p class="muted">Registered sessions, live agents, and viewer channels.</p>
+              </div>
+            </div>
+            <div id="stats-sessions"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Instance health</h2>
+                <p class="muted">Process, database, and terminal relay.</p>
+              </div>
+            </div>
+            <div id="stats-process"></div>
+          </section>
+        </div>
       </section>
 
       <section class="view" id="view-keys" hidden>
@@ -242,6 +318,7 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
   <script src="/vendor/addon-webgl.js"></script>
+  <script src="/stats.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

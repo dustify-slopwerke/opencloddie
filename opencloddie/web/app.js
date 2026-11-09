@@ -519,6 +519,7 @@ function formatUptime(seconds) {
 /* ---------------------------------------------------------------- views */
 const VIEWS = {
   sessions: { title: 'Sessions', subtitle: () => `${state.sessions.filter((s) => s.online).length} online · ${state.sessions.length} total` },
+  stats: { title: 'Statistics', subtitle: () => (window.StatsView ? StatsView.subtitle() : 'instance and usage') },
   keys: { title: 'API keys', subtitle: () => 'one model per key' },
   settings: { title: 'Settings', subtitle: () => 'account and gateway' },
 };
@@ -534,6 +535,10 @@ function setView(view) {
   $('#view-title').textContent = VIEWS[view].title;
   $('#view-subtitle').textContent = VIEWS[view].subtitle();
   renderTopbar();
+  if (window.StatsView) {
+    if (view === 'stats') StatsView.show();
+    else StatsView.hide();
+  }
   if (view === 'keys') loadKeys();
   if (view === 'settings') {
     renderSettings();
@@ -567,6 +572,18 @@ function renderTopbar() {
       h('button', { class: 'btn btn-ghost btn-sm', text: 'Refresh', onclick: () => loadSessions() }),
       h('button', { class: 'btn btn-primary btn-sm', text: 'Connect session', onclick: connectModal }),
     );
+  } else if (state.view === 'stats') {
+    if (window.StatsView) {
+      root.append(
+        h('button', { class: 'btn btn-sm', text: 'Refresh', onclick: () => StatsView.refresh() }),
+        h('button', {
+          class: 'btn btn-ghost btn-sm',
+          id: 'stats-pause',
+          text: StatsView.isPaused() ? 'Resume' : 'Pause',
+          onclick: () => StatsView.togglePause(),
+        }),
+      );
+    }
   } else if (state.view === 'keys') {
     root.append(h('button', { class: 'btn btn-primary btn-sm', text: 'Create key', onclick: createKeyModal }));
   }

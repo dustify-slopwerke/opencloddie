@@ -89,7 +89,7 @@ class FakeUpstream:
                     self.send_header("Cache-Control", "no-cache")
                     self.end_headers()
                     events = [
-                        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","model":"%s"}}\n\n'
+                        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","model":"%s","usage":{"input_tokens":3,"output_tokens":0}}}\n\n'
                         % model,
                         'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}\n\n',
                         'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":1}}\n\n',

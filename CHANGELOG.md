@@ -6,6 +6,23 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Statistics view in the web UI: instance health (uptime, memory, CPU, threads,
+  FDs, load, database and disk size), gateway usage (requests, status codes,
+  errors, rate-limit hits, bytes, input/output/cache tokens, upstream latency,
+  per model and per API key), and session activity (online state, viewers,
+  connected duration, last seen, terminal bytes).
+- `GET /api/metrics?window=` with 1h / 6h / 24h / 7d ranges. Live counters are
+  process-lifetime; per-minute aggregates are persisted in SQLite (schema v2)
+  and retained for `metrics.retention_days` (default 7).
+- Token accounting parsed from non-stream JSON `usage` and streamed
+  `message_start` / `message_delta` SSE events. `count_tokens` is counted as a
+  request without token usage.
+- Members of `metrics.admin_groups` (default `god`, injected by the auth proxy)
+  see all users' usage; everyone else sees only their own keys, sessions, and
+  usage. Instance/process health is global, like `/api/system`.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

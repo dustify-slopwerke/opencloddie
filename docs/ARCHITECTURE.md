@@ -57,6 +57,14 @@ api_keys(id, user_id FK, name, prefix, token_hash UNIQUE, model,
 
 sessions(id PK, user_id FK, api_key_id, name, hostname, cwd, model,
          online, agent_id, created_at, last_seen_at, metadata JSON)
+
+usage_minutes(bucket, user_id, api_key_id, api_key_name, username, model,
+              requests, ok, client_errors, server_errors, rate_limited,
+              bytes_in, bytes_out, tokens_in, tokens_out,
+              cache_read_tokens, cache_creation_tokens)
+
+instance_minutes(bucket, sessions_online, sessions_total, agents, viewers,
+                 rss_bytes, cpu_seconds, threads, db_bytes)
 ```
 
 - Users are created on first web request from `Remote-User`; there is no
@@ -194,6 +202,39 @@ UI (install commands).
    `X-Forwarded-Proto` + `Host`; both listeners share it.
 3. Else derive `http://<host>:web_port` and `http://<host>:api_port`, which is
    what local development needs.
+
+## Statistics and instrumentation
+
+`opencloddie/metrics.py` is a process-local, thread-safe registry for the web
+Statistics view.  Nothing in it is required for the gateway or terminal paths;
+if the registry is unavailable, requests still flow.
+
+- **Gateway** (`gateway.py`): `proxy()` takes one metric token per logical
+  request.  `ProxyResult.finish_metrics()` records status, bytes, latency, and
+  tokens exactly once, whether the body is read with `read_all()`, streamed with
+  `iter_bytes()`, or closed after a client disconnect.  A fallback retry is one
+  request, not two.  Streams feed an incremental SSE parser for
+  `message_start` / `message_delta` usage; non-stream bodies parse `usage` from
+  JSON.  `Gateway.rate_snapshot()` exposes the sliding-window limit read-only.
+- **Agent hub** (`sessions.py`): each connection tracks `connected_at` and
+  terminal payload bytes; the hub keeps lifetime connection/channel/byte
+  counters.  `snapshot(user_id)` returns live connections scoped by owner and
+  reports the real `last_seen`, not the request time.
+- **Process health**: `process_snapshot()` samples `/proc/self/status`,
+  `/proc/self/io`, `/proc/self/fd`, `os.times()`, load average, disk usage, and
+  SQLite file size.  Every field degrades to `null` instead of failing.
+- **Persistence**: `App.metrics_tick()` (called by the watchdog and by
+  `GET /api/metrics`) flushes pending per-key deltas and one instance sample
+  into `usage_minutes` / `instance_minutes`, at most once per
+  `metrics.sample_seconds` (default 60s).  Rows older than
+  `metrics.retention_days` (default 7) are purged hourly and at startup.
+- **Scoping**: `GET /api/metrics` filters per-key/session/usage data to the
+  caller unless they are in `metrics.admin_groups` (default `["god"]`, supplied
+  by the auth proxy).  Instance/process counters are global, matching
+  `/api/system`.
+- **Single node**: counters are in memory, so live numbers reset when the
+  process restarts.  Persisted minute buckets survive and are the source for
+  the charts.  A multi-replica deployment would need a shared metrics store.
 
 ## Design decisions
 

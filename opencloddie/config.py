@@ -62,6 +62,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "secrets": {
         "master": "",
     },
+    "metrics": {
+        # How often live gateway counters are flushed to SQLite.
+        "sample_seconds": 60,
+        # How long per-minute history is kept.
+        "retention_days": 7,
+        # Proxy-injected groups that may see all users' usage in the UI.
+        "admin_groups": ["god"],
+    },
     "database": {
         "path": "",
     },
@@ -166,6 +174,30 @@ def _validate(cfg: dict[str, Any]) -> None:
         raise ValueError("web and api listeners cannot share host:port")
     if cfg["gateway"].get("auth_style") not in ("bearer", "x-api-key"):
         raise ValueError("gateway.auth_style must be 'bearer' or 'x-api-key'")
+
+    metrics = cfg.get("metrics")
+    if metrics is None:
+        metrics = {}
+    if not isinstance(metrics, dict):
+        raise ValueError("metrics must be a JSON object")
+    try:
+        sample = int(metrics.get("sample_seconds", 60))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("metrics.sample_seconds must be a number") from exc
+    try:
+        retention = int(metrics.get("retention_days", 7))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("metrics.retention_days must be a number") from exc
+    groups = metrics.get("admin_groups", ["god"])
+    if isinstance(groups, str):
+        groups = [groups]
+    if not isinstance(groups, list):
+        raise ValueError("metrics.admin_groups must be a list")
+    groups = [str(group).strip() for group in groups if str(group).strip()]
+    metrics["sample_seconds"] = min(3600, max(10, sample))
+    metrics["retention_days"] = min(90, max(1, retention))
+    metrics["admin_groups"] = groups or ["god"]
+    cfg["metrics"] = metrics
 
 
 def build_default_config(*, dev: bool = False) -> dict[str, Any]:
