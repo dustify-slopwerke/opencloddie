@@ -11,7 +11,7 @@ from typing import Any
 from .crypto import hash_api_key, key_prefix, new_api_key
 from .util import iso, new_short_id, safe_username, utcnow
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -59,6 +59,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    from_session_id TEXT,
+    from_name TEXT NOT NULL DEFAULT '',
+    to_session_id TEXT NOT NULL,
+    to_name TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    reply_to INTEGER,
+    created_at TEXT NOT NULL,
+    read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_inbox
+    ON messages(user_id, to_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_outbox
+    ON messages(user_id, from_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_unread
+    ON messages(user_id, to_session_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_messages_age ON messages(created_at);
 CREATE TABLE IF NOT EXISTS usage_minutes (
     bucket INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -103,6 +122,10 @@ def _row_value(row: Any, name: str) -> Any:
     if isinstance(row, dict):
         return row.get(name, 0)
     return getattr(row, name, 0)
+
+
+class MailboxFull(Exception):
+    """Raised when a recipient's unread mailbox is at its configured cap."""
 
 
 class Database:
@@ -412,6 +435,173 @@ class Database:
         with self.lock, self.conn:
             cur = self.conn.execute(
                 "DELETE FROM sessions WHERE online=0 AND last_seen_at < ?", (cutoff,)
+            )
+        return cur.rowcount
+
+    # ------------------------------------------------------------ messages
+    def add_message(
+        self,
+        *,
+        user_id: int,
+        to_session_id: str,
+        body: str,
+        from_session_id: str | None = None,
+        from_name: str = "",
+        to_name: str = "",
+        reply_to: int | None = None,
+        max_unread: int = 0,
+    ) -> dict[str, Any]:
+        """Insert a mailbox message.
+
+        The recipient must exist and belong to ``user_id``.  The sender is
+        optional: a session row may not exist yet during the brief window
+        between tmux start and agent registration, and a human CLI/web send has
+        no session at all.  When the sender row exists, its name is used.
+        """
+        now = iso()
+        with self.lock, self.conn:
+            recipient = self.conn.execute(
+                "SELECT id, name FROM sessions WHERE id=? AND user_id=?",
+                (to_session_id, user_id),
+            ).fetchone()
+            if recipient is None:
+                raise LookupError("target session not found")
+            if from_session_id:
+                sender = self.conn.execute(
+                    "SELECT name FROM sessions WHERE id=? AND user_id=?",
+                    (from_session_id, user_id),
+                ).fetchone()
+                if sender is not None:
+                    from_name = sender["name"] or from_name
+                elif from_name == "":
+                    # The id is known but its row is not registered yet; keep
+                    # the message rather than dropping it in a startup race.
+                    from_name = from_session_id
+            if max_unread > 0:
+                unread = self.conn.execute(
+                    "SELECT COUNT(*) FROM messages "
+                    "WHERE user_id=? AND to_session_id=? AND read_at IS NULL",
+                    (user_id, to_session_id),
+                ).fetchone()[0]
+                if int(unread) >= max_unread:
+                    raise MailboxFull(to_session_id)
+            cur = self.conn.execute(
+                """INSERT INTO messages(user_id, from_session_id, from_name,
+                       to_session_id, to_name, body, reply_to, created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    user_id,
+                    from_session_id,
+                    from_name,
+                    to_session_id,
+                    to_name or recipient["name"],
+                    body,
+                    reply_to,
+                    now,
+                ),
+            )
+            row = self.conn.execute(
+                "SELECT * FROM messages WHERE id=?", (cur.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def list_messages(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        unread_only: bool = False,
+        limit: int = 50,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        query = "SELECT * FROM messages WHERE user_id=? AND to_session_id=?"
+        params: list[Any] = [user_id, session_id]
+        if unread_only:
+            query += " AND read_at IS NULL"
+        if after_id is not None:
+            query += " AND id > ?"
+            params.append(int(after_id))
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+        with self.lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_conversation(
+        self,
+        user_id: int,
+        session_a: str,
+        session_b: str = "",
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        if session_b:
+            query = (
+                "SELECT * FROM messages WHERE user_id=? AND ("
+                "(from_session_id=? AND to_session_id=?) OR "
+                "(from_session_id=? AND to_session_id=?)) "
+                "ORDER BY id ASC LIMIT ?"
+            )
+            params: list[Any] = [user_id, session_a, session_b, session_b, session_a, limit]
+        else:
+            query = (
+                "SELECT * FROM messages WHERE user_id=? AND "
+                "(from_session_id=? OR to_session_id=?) ORDER BY id ASC LIMIT ?"
+            )
+            params = [user_id, session_a, session_a, limit]
+        with self.lock:
+            rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_message(self, user_id: int, message_id: int) -> dict[str, Any] | None:
+        with self.lock:
+            return _row(
+                self.conn.execute(
+                    "SELECT * FROM messages WHERE id=? AND user_id=?",
+                    (int(message_id), user_id),
+                ).fetchone()
+            )
+
+    def mark_messages_read(self, user_id: int, session_id: str, ids: list[int]) -> int:
+        clean = sorted({int(value) for value in ids})[:100]
+        if not clean:
+            return 0
+        placeholders = ",".join("?" for _ in clean)
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE messages SET read_at=? WHERE user_id=? AND to_session_id=? "
+                f"AND read_at IS NULL AND id IN ({placeholders})",
+                [iso(), user_id, session_id, *clean],
+            )
+        return cur.rowcount
+
+    def unread_counts(self, user_id: int) -> dict[str, int]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT to_session_id, COUNT(*) AS n FROM messages "
+                "WHERE user_id=? AND read_at IS NULL GROUP BY to_session_id",
+                (user_id,),
+            ).fetchall()
+        return {row["to_session_id"]: int(row["n"]) for row in rows}
+
+    def count_unread(self, user_id: int, session_id: str) -> int:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM messages "
+                "WHERE user_id=? AND to_session_id=? AND read_at IS NULL",
+                (user_id, session_id),
+            ).fetchone()
+        return int(row[0])
+
+    def purge_messages(self, older_than_days: int = 30) -> int:
+        from datetime import timedelta
+
+        cutoff = iso(utcnow() - timedelta(days=max(1, int(older_than_days))))
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM messages WHERE created_at < ?", (cutoff,)
             )
         return cur.rowcount
 

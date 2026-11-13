@@ -22,6 +22,13 @@ opencloddie is three things in one small, dependency-free service:
    OpenCode key, and monitor gateway usage, tokens, sessions, and process
    health in a Statistics view (with persisted 1h/6h/24h/7d history).
 
+Sessions can message each other through a durable, same-account mailbox.  Say
+*"talk to the eve-o-tool session to work up X"* in one session, then *"check your
+mailbox"* in the other; the client gives Claude `send_session_message` and
+`check_mailbox` tools, and humans get `opencloddie msg` / `opencloddie inbox`
+plus unread badges in the web UI.  Delivery is pull-only, so nothing interrupts
+a working session.
+
 No peak/off-peak heuristics: you pick the model, per API key, in the UI.
 
 ```

@@ -6,6 +6,30 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Session-to-session mailbox: a durable, same-account message store (schema
+  v3) with `POST/GET /client/mailbox` and `POST /client/mailbox/read`,
+  pull-only delivery, and unread counts in the session listings.
+- `opencloddie msg` and `opencloddie inbox` commands; `opencloddie ls` now
+  shows an `UNREAD` column.
+- A per-session MCP server (`opencloddie __mcp`) exposing `list_sessions`,
+  `send_session_message`, and `check_mailbox`.  The client runner writes a
+  per-session `--mcp-config` file and exports `OPENCLODDIE_SESSION_ID` and
+  `OPENCLODDIE_CONFIG` to the session environment.
+- Web mailbox modal with unread tab badges, backed by
+  `GET/POST /api/sessions/<id>/messages` and
+  `POST /api/sessions/<id>/messages/read`.
+- `messages` config block: enablement, retention (30 days), body size
+  (64 KiB), unread cap (500), and send rate limit (60/minute).
+
+### Upgrade notes
+
+- Sessions already running in tmux do not pick up the MCP tools until they are
+  recreated: `opencloddie stop NAME`, then
+  `opencloddie run --name NAME -- --continue`.  `opencloddie msg` / `inbox`
+  still work through Bash.
+
 ## [0.4.0] - 2026-11-09
 
 ### Added

@@ -555,3 +555,62 @@ pre {
   .stats-facts { grid-template-columns: 92px minmax(0, 1fr); }
   .stats-updated { display: none; }
 }
+
+/* ---------------------------------------------------------------- mailbox */
+.tab-badge {
+  margin-left: 5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--blue);
+  color: #06121f;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+  flex: none;
+}
+.mailbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+  margin: 10px 0;
+  padding-right: 2px;
+}
+.mailbox-message {
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+.mailbox-message.is-outgoing {
+  border-color: var(--border);
+  background: var(--bg-glow);
+}
+.mailbox-meta {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.mailbox-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.mailbox-compose {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+}
+.mailbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}

@@ -572,6 +572,11 @@ function renderTopbar() {
       h('button', { class: 'btn btn-ghost btn-sm', text: 'Refresh', onclick: () => loadSessions() }),
       h('button', { class: 'btn btn-primary btn-sm', text: 'Connect session', onclick: connectModal }),
     );
+    if (state.me && state.me.messages_enabled !== false) {
+      root.prepend(
+        h('button', { class: 'btn btn-sm', text: 'Mailbox', title: 'Read and send session messages', onclick: () => mailboxModal() }),
+      );
+    }
   } else if (state.view === 'stats') {
     if (window.StatsView) {
       root.append(
@@ -796,6 +801,7 @@ function renderTabs() {
     },
       h('span', { class: `dot ${session.online ? 'online' : ''}`.trim() }),
       h('span', { class: 'tab-name', text: session.name }),
+      session.unread > 0 ? h('span', { class: 'tab-badge', text: String(session.unread), title: `${session.unread} unread message(s)` }) : null,
     );
     root.append(tab);
   }
@@ -1395,6 +1401,115 @@ function createKeyModal() {
       },
     ],
   });
+}
+
+function mailboxModal(initialId) {
+  if (!state.sessions.length) {
+    openModal({
+      title: 'Mailbox',
+      body: h('p', { class: 'muted', text: 'No sessions connected.' }),
+      actions: [{ label: 'Close', class: 'btn-ghost' }],
+    });
+    return;
+  }
+
+  const picker = h('select', { class: 'input select' });
+  const preferred = initialId || state.activeId || state.sessions[0].id;
+  for (const session of state.sessions) {
+    const unread = Number(session.unread || 0);
+    picker.append(h('option', {
+      value: session.id,
+      selected: session.id === preferred,
+      text: `${session.name} · ${session.hostname || 'unknown host'}${unread ? ` · ${unread} unread` : ''}`,
+    }));
+  }
+
+  const list = h('div', { class: 'mailbox-list' });
+  const status = h('p', { class: 'hint', text: '' });
+  const composer = h('textarea', {
+    class: 'input mailbox-compose',
+    rows: 3,
+    placeholder: 'Message this session…',
+  });
+  let shown = [];
+
+  async function load() {
+    clear(list);
+    status.textContent = 'Loading…';
+    try {
+      const data = await api(`/api/sessions/${encodeURIComponent(picker.value)}/messages?limit=50`);
+      shown = data.messages || [];
+      status.textContent = data.unread ? `${data.unread} unread` : 'No unread messages';
+      if (!shown.length) {
+        list.append(h('p', { class: 'muted', text: 'No messages yet.' }));
+        return;
+      }
+      for (const message of shown) {
+        const incoming = message.to_session_id === picker.value;
+        list.append(h('div', { class: `mailbox-message ${incoming ? 'is-incoming' : 'is-outgoing'}` },
+          h('div', {
+            class: 'mailbox-meta',
+            text: `#${message.id} · ${message.from_name || 'unknown'}${message.reply_to ? ` · reply to #${message.reply_to}` : ''} · ${message.created_at || ''}`,
+          }),
+          h('div', { class: 'mailbox-body', text: message.body || '' }),
+        ));
+      }
+      list.scrollTop = list.scrollHeight;
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  }
+
+  async function send() {
+    const text = composer.value.trim();
+    if (!text) return;
+    try {
+      await api(`/api/sessions/${encodeURIComponent(picker.value)}/messages`, {
+        method: 'POST',
+        body: { body: text },
+      });
+      composer.value = '';
+      await load();
+      await loadSessions({ quiet: true });
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function markRead() {
+    const ids = shown
+      .filter((message) => !message.read_at && message.to_session_id === picker.value)
+      .map((message) => message.id);
+    if (!ids.length) {
+      toast('Nothing to mark read');
+      return;
+    }
+    try {
+      await api(`/api/sessions/${encodeURIComponent(picker.value)}/messages/read`, {
+        method: 'POST',
+        body: { ids },
+      });
+      await load();
+      await loadSessions({ quiet: true });
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  picker.addEventListener('change', load);
+  const body = h('div', {},
+    h('div', { class: 'field' }, h('label', { text: 'Session' }), picker),
+    status,
+    list,
+    h('div', { class: 'field' }, h('label', { text: 'Send a message' }), composer),
+    h('div', { class: 'mailbox-actions' },
+      h('button', { class: 'btn btn-primary btn-sm', text: 'Send', onclick: send }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'Refresh', onclick: load }),
+      h('button', { class: 'btn btn-ghost btn-sm', text: 'Mark read', onclick: markRead }),
+    ),
+  );
+  openModal({ title: 'Mailbox', body, actions: [{ label: 'Close', class: 'btn-ghost' }] });
+  load();
 }
 
 function showToken(key) {

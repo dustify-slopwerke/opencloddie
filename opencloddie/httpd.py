@@ -32,10 +32,12 @@ from . import __version__
 from .auth import ApiIdentity, AuthError, WebIdentity, api_identity, web_identity
 from .config import APP_NAME
 from .crypto import decrypt_secret, encrypt_secret
+from .db import MailboxFull
 from .gateway import Gateway, GatewayError, error_body
+from .messages import SendLimiter, clean_body, public_message, resolve_session
 from .metrics import Metrics, process_snapshot
 from .models import context_tokens_for, model_ids, normalize_model
-from .sessions import AgentHub, AgentUnavailable
+from .sessions import SESSION_ID_RE, AgentHub, AgentUnavailable
 from .util import (
     human_age,
     iso,
@@ -103,6 +105,16 @@ class App:
         self._metrics_lock = threading.Lock()
         self.gateway = Gateway(cfg, self.db, self.metrics)
         self.hub = AgentHub(self)
+        messages_cfg = cfg.get("messages") or {}
+        self.messages_cfg = messages_cfg
+        self.messages_enabled = bool(messages_cfg.get("enabled", True))
+        self.message_limiter = SendLimiter(
+            int(messages_cfg.get("rate_limit_per_minute") or 0)
+        )
+        self._messages_purge_lock = threading.Lock()
+        self._last_messages_purge = time.time()
+        if self.messages_enabled:
+            self.db.purge_messages(int(messages_cfg.get("retention_days") or 30))
         self.web_root = Path(__file__).resolve().parent / "web"
         package_client = Path(__file__).resolve().parent / "client" / "opencloddie"
         repo_client = Path(__file__).resolve().parent.parent / "bin" / "opencloddie"
@@ -178,6 +190,19 @@ class App:
             if self.metrics.purge_due(now):
                 self.db.purge_metrics(self.metrics.retention_cutoff(now))
                 self.metrics.mark_purged(now)
+
+    def messages_purge_tick(self, force: bool = False) -> None:
+        if not self.messages_enabled:
+            return
+        now = time.time()
+        with self._messages_purge_lock:
+            if not force and now - self._last_messages_purge < 3600:
+                return
+            self._last_messages_purge = now
+        try:
+            self.db.purge_messages(int(self.messages_cfg.get("retention_days") or 30))
+        except Exception:  # noqa: BLE001 - retention is best-effort
+            log.exception("message purge failed")
 
 
 class OpenCloddieHTTPServer(ThreadingHTTPServer):
@@ -344,9 +369,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
 
     def _send_api_error(
-        self, status: int, message: str, error_type: str = "api_error", headers: dict[str, str] | None = None
+        self,
+        status: int,
+        message: str,
+        error_type: str = "api_error",
+        headers: dict[str, str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        self._send_json(status, {"ok": False, "error": {"message": message, "type": error_type}}, headers=headers)
+        error: dict[str, Any] = {"message": message, "type": error_type}
+        if extra:
+            error.update(extra)
+        self._send_json(status, {"ok": False, "error": error}, headers=headers)
 
     def _send_anthropic_error(
         self, status: int, message: str, error_type: str = "api_error", headers: dict[str, str] | None = None
@@ -395,9 +428,17 @@ class Handler(BaseHTTPRequestHandler):
                     _auth_page(exc.message, self.app.cfg["web"].get("auth_portal_url") or ""),
                 )
             if self._is_gateway_path():
-                self._send_anthropic_error(exc.status, exc.message, exc.error_type)
+                self._send_anthropic_error(
+                    exc.status, exc.message, exc.error_type, headers=exc.headers
+                )
             else:
-                self._send_api_error(exc.status, exc.message, exc.error_type)
+                self._send_api_error(
+                    exc.status,
+                    exc.message,
+                    exc.error_type,
+                    headers=exc.headers,
+                    extra=exc.extra,
+                )
         except GatewayError as exc:
             if getattr(self, "_response_started", False):
                 self.close_connection = True
@@ -471,6 +512,10 @@ class Handler(BaseHTTPRequestHandler):
             if urlsplit(origin).hostname != urlsplit(f"//{host}").hostname:
                 raise AuthError(403, "cross-origin request rejected", "forbidden")
 
+    def _require_messages(self) -> None:
+        if not self.app.messages_enabled:
+            raise AuthError(403, "session messaging is disabled", "messages_disabled")
+
     def _route_web_api(self, method: str, path: str, identity: WebIdentity) -> None:
         app = self.app
         user = app.db.user_by_id(identity.user_id) or identity.user
@@ -488,6 +533,7 @@ class Handler(BaseHTTPRequestHandler):
                     "default_model": normalize_model(
                         app.models, user.get("default_model"), app.default_model
                     ),
+                    "messages_enabled": app.messages_enabled,
                     "urls": urls,
                     "install": {
                         "command": (
@@ -623,11 +669,19 @@ class Handler(BaseHTTPRequestHandler):
             raise AuthError(405, "method not allowed")
 
         if path == "/api/sessions" and method in ("GET", "HEAD"):
+            unread = app.db.unread_counts(identity.user_id)
             sessions = [
-                self._public_session(s)
+                self._public_session(s, unread=unread.get(s["id"], 0))
                 for s in app.db.list_sessions(identity.user_id)
             ]
-            return self._send_json(200, {"ok": True, "sessions": sessions})
+            return self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "sessions": sessions,
+                    "unread_total": sum(unread.values()),
+                },
+            )
 
         match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)", path)
         if match:
@@ -640,7 +694,16 @@ class Handler(BaseHTTPRequestHandler):
                 app.db.delete_session(session_id, identity.user_id)
                 return self._send_json(200, {"ok": True})
             if method in ("GET", "HEAD"):
-                return self._send_json(200, {"ok": True, "session": self._public_session(session)})
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "session": self._public_session(
+                            session,
+                            unread=app.db.count_unread(identity.user_id, session_id),
+                        ),
+                    },
+                )
             raise AuthError(405, "method not allowed")
 
         match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/ws", path)
@@ -650,6 +713,80 @@ class Handler(BaseHTTPRequestHandler):
             if not session or session["user_id"] != identity.user_id:
                 raise AuthError(404, "session not found", "not_found")
             return self._web_terminal_ws(session)
+
+        match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/messages", path)
+        if match:
+            self._require_messages()
+            session_id = match.group(1)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            if method in ("GET", "HEAD"):
+                query = self._query()
+                peer = (query.get("peer") or [""])[0].strip()
+                if peer:
+                    peer_row = app.db.get_session(peer)
+                    if not peer_row or peer_row["user_id"] != identity.user_id:
+                        raise AuthError(404, "peer session not found", "not_found")
+                limit = _int_param(query, "limit", 50)
+                rows = app.db.list_conversation(
+                    identity.user_id, session_id, peer, limit=limit
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "messages": [public_message(row) for row in rows],
+                        "unread": app.db.count_unread(identity.user_id, session_id),
+                    },
+                )
+            if method == "POST":
+                max_body = int(app.messages_cfg.get("max_body_bytes") or 65536)
+                body = self._json_body(limit=min(MAX_BODY, max_body + 4096))
+                text = clean_body(body.get("body"), max_body)
+                app.message_limiter.check(identity.user_id)
+                try:
+                    row = app.db.add_message(
+                        user_id=identity.user_id,
+                        to_session_id=session_id,
+                        body=text,
+                        from_name=identity.name or identity.username,
+                        to_name=session.get("name") or "",
+                        max_unread=int(
+                            app.messages_cfg.get("max_unread_per_session") or 0
+                        ),
+                    )
+                except LookupError as exc:
+                    raise AuthError(404, "session not found", "not_found") from exc
+                except MailboxFull as exc:
+                    raise AuthError(
+                        409, "the recipient mailbox is full", "mailbox_full"
+                    ) from exc
+                return self._send_json(
+                    201,
+                    {
+                        "ok": True,
+                        "message": public_message(row),
+                        "unread": app.db.count_unread(identity.user_id, session_id),
+                    },
+                )
+            raise AuthError(405, "method not allowed")
+
+        match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/messages/read", path)
+        if match:
+            self._require_messages()
+            if method != "POST":
+                raise AuthError(405, "method not allowed")
+            session_id = match.group(1)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            body = self._json_body()
+            ids = body.get("ids")
+            if not isinstance(ids, list):
+                raise AuthError(400, "ids must be a list", "invalid_request")
+            marked = app.db.mark_messages_read(identity.user_id, session_id, ids)
+            return self._send_json(200, {"ok": True, "marked": marked})
 
         raise AuthError(404, "not found", "not_found")
 
@@ -778,7 +915,7 @@ class Handler(BaseHTTPRequestHandler):
             "revoked_at": row.get("revoked_at"),
         }
 
-    def _public_session(self, session: dict[str, Any]) -> dict[str, Any]:
+    def _public_session(self, session: dict[str, Any], *, unread: int = 0) -> dict[str, Any]:
         agent = self.app.hub.get_for_session(session["id"])
         return {
             "id": session["id"],
@@ -793,6 +930,7 @@ class Handler(BaseHTTPRequestHandler):
             "last_seen_at": session.get("last_seen_at"),
             "last_seen": human_age(session.get("last_seen_at")),
             "viewers": len(agent.channels) if agent else 0,
+            "unread": int(unread),
         }
 
     # -------------------------------------------------------------- ws: web
@@ -1000,6 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
                     "context_tokens": context_tokens_for(app.models, model),
                     "models": app.models,
                     "opencode_key_set": bool(identity.opencode_key_enc),
+                    "messages_enabled": app.messages_enabled,
                     "gateway_base_url": urls["api"],
                     "web_url": urls["web"],
                     "install": {
@@ -1012,8 +1151,19 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/client/sessions" and method in ("GET", "HEAD"):
-            sessions = [self._public_session(s) for s in app.db.list_sessions(identity.user_id)]
-            return self._send_json(200, {"ok": True, "sessions": sessions})
+            unread = app.db.unread_counts(identity.user_id)
+            sessions = [
+                self._public_session(s, unread=unread.get(s["id"], 0))
+                for s in app.db.list_sessions(identity.user_id)
+            ]
+            return self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "sessions": sessions,
+                    "unread_total": sum(unread.values()),
+                },
+            )
 
         match = re.fullmatch(r"/client/sessions/([A-Za-z0-9_-]+)", path)
         if match:
@@ -1026,8 +1176,140 @@ class Handler(BaseHTTPRequestHandler):
                 app.db.delete_session(session_id, identity.user_id)
                 return self._send_json(200, {"ok": True})
             if method in ("GET", "HEAD"):
-                return self._send_json(200, {"ok": True, "session": self._public_session(session)})
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "session": self._public_session(
+                            session,
+                            unread=app.db.count_unread(identity.user_id, session_id),
+                        ),
+                    },
+                )
             raise AuthError(405, "method not allowed")
+
+        if path == "/client/mailbox":
+            self._require_messages()
+            if method in ("GET", "HEAD"):
+                query = self._query()
+                session_id = (query.get("session") or [""])[0].strip()
+                if not SESSION_ID_RE.fullmatch(session_id):
+                    raise AuthError(400, "session is required", "invalid_request")
+                session = app.db.get_session(session_id)
+                if session is not None and session["user_id"] != identity.user_id:
+                    raise AuthError(404, "session not found", "session_not_found")
+                unread_only = (query.get("unread") or ["1"])[0].lower() not in (
+                    "0",
+                    "false",
+                    "no",
+                )
+                limit = max(1, min(_int_param(query, "limit", 20), 100))
+                try:
+                    after = max(0, int((query.get("after") or ["0"])[0]))
+                except (TypeError, ValueError):
+                    after = 0
+                rows = app.db.list_messages(
+                    identity.user_id,
+                    session_id,
+                    unread_only=unread_only,
+                    limit=limit,
+                    after_id=after or None,
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "messages": [public_message(row) for row in rows],
+                        "unread": app.db.count_unread(identity.user_id, session_id),
+                        "has_more": len(rows) >= limit,
+                    },
+                )
+            if method == "POST":
+                max_body = int(app.messages_cfg.get("max_body_bytes") or 65536)
+                body = self._json_body(limit=min(MAX_BODY, max_body + 4096))
+                sender_id = str(body.get("session") or "").strip()
+                if sender_id and not SESSION_ID_RE.fullmatch(sender_id):
+                    raise AuthError(400, "invalid session id", "invalid_request")
+                sender = app.db.get_session(sender_id) if sender_id else None
+                if sender is not None and sender["user_id"] != identity.user_id:
+                    raise AuthError(404, "session not found", "session_not_found")
+                target = resolve_session(
+                    app.db, identity.user_id, str(body.get("to") or "")
+                )
+                if sender_id and target["id"] == sender_id:
+                    raise AuthError(
+                        400,
+                        "cannot send a message to the same session",
+                        "cannot_message_self",
+                    )
+                text = clean_body(body.get("body"), max_body)
+                reply_to = body.get("reply_to")
+                if reply_to is not None:
+                    try:
+                        reply_to = int(reply_to)
+                    except (TypeError, ValueError) as exc:
+                        raise AuthError(
+                            400, "reply_to must be a message id", "invalid_request"
+                        ) from exc
+                    if app.db.get_message(identity.user_id, reply_to) is None:
+                        raise AuthError(
+                            400, "reply_to message not found", "invalid_request"
+                        )
+                app.message_limiter.check(identity.user_id)
+                try:
+                    row = app.db.add_message(
+                        user_id=identity.user_id,
+                        to_session_id=target["id"],
+                        body=text,
+                        from_session_id=sender_id or None,
+                        from_name=(sender or {}).get("name")
+                        or ("" if sender_id else identity.username),
+                        to_name=target.get("name") or "",
+                        reply_to=reply_to,
+                        max_unread=int(
+                            app.messages_cfg.get("max_unread_per_session") or 0
+                        ),
+                    )
+                except LookupError as exc:
+                    raise AuthError(
+                        404, "target session not found", "target_not_found"
+                    ) from exc
+                except MailboxFull as exc:
+                    raise AuthError(
+                        409, "the recipient mailbox is full", "mailbox_full"
+                    ) from exc
+                return self._send_json(
+                    201,
+                    {
+                        "ok": True,
+                        "message": public_message(row),
+                        "target": {
+                            "id": target["id"],
+                            "name": target.get("name") or "",
+                            "hostname": target.get("hostname") or "",
+                            "online": app.hub.is_online(target["id"]),
+                        },
+                        "unread": app.db.count_unread(identity.user_id, target["id"]),
+                    },
+                )
+            raise AuthError(405, "method not allowed")
+
+        if path == "/client/mailbox/read":
+            self._require_messages()
+            if method != "POST":
+                raise AuthError(405, "method not allowed")
+            body = self._json_body()
+            session_id = str(body.get("session") or "").strip()
+            if not SESSION_ID_RE.fullmatch(session_id):
+                raise AuthError(400, "session is required", "invalid_request")
+            session = app.db.get_session(session_id)
+            if session is not None and session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "session_not_found")
+            ids = body.get("ids")
+            if not isinstance(ids, list):
+                raise AuthError(400, "ids must be a list", "invalid_request")
+            marked = app.db.mark_messages_read(identity.user_id, session_id, ids)
+            return self._send_json(200, {"ok": True, "marked": marked})
 
         raise AuthError(404, "not found", "not_found")
 

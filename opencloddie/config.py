@@ -70,6 +70,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Proxy-injected groups that may see all users' usage in the UI.
         "admin_groups": ["god"],
     },
+    "messages": {
+        # Session-to-session mailbox.  Pull-only: the receiving agent calls
+        # `check_mailbox`; nothing is pushed into a running session.
+        "enabled": True,
+        "retention_days": 30,
+        "max_body_bytes": 64 * 1024,
+        "max_unread_per_session": 500,
+        "rate_limit_per_minute": 60,
+    },
     "database": {
         "path": "",
     },
@@ -198,6 +207,30 @@ def _validate(cfg: dict[str, Any]) -> None:
     metrics["retention_days"] = min(90, max(1, retention))
     metrics["admin_groups"] = groups or ["god"]
     cfg["metrics"] = metrics
+
+    messages = cfg.get("messages")
+    if messages is None:
+        messages = {}
+    if not isinstance(messages, dict):
+        raise ValueError("messages must be a JSON object")
+    enabled = messages.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("messages.enabled must be true or false")
+    numeric: dict[str, tuple[int, int, int]] = {
+        # key: (default, minimum, maximum)
+        "retention_days": (30, 1, 365),
+        "max_body_bytes": (64 * 1024, 1024, 1024 * 1024),
+        "max_unread_per_session": (500, 1, 10000),
+        "rate_limit_per_minute": (60, 0, 600),
+    }
+    for key, (default, low, high) in numeric.items():
+        try:
+            value = int(messages.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"messages.{key} must be a number") from exc
+        messages[key] = min(high, max(low, value))
+    messages["enabled"] = enabled
+    cfg["messages"] = messages
 
 
 def build_default_config(*, dev: bool = False) -> dict[str, Any]:

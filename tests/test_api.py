@@ -368,6 +368,176 @@ class ApiTest(unittest.TestCase):
         self.assertIn("msg_test", data["id"])
         self.assertTrue(self.upstream.requests[0]["path"].endswith("/v1/messages/count_tokens"))
 
+    # --------------------------------------------------------------- mailbox
+    def _register_session(self, user, key, session_id, name, hostname="host"):
+        self.server.app.db.upsert_session(
+            session_id=session_id,
+            user_id=user["id"],
+            api_key_id=key["id"],
+            name=name,
+            hostname=hostname,
+            cwd="/tmp",
+            model="m",
+            agent_id="a_" + session_id,
+        )
+
+    def test_mailbox_client_api(self):
+        alice_token, alice_key = self.server.create_user_key("alice")
+        bob_token, bob_key = self.server.create_user_key("bob")
+        alice = self.server.app.db.user_by_username("alice")
+        bob = self.server.app.db.user_by_username("bob")
+        self._register_session(alice, alice_key, "s_a", "consumer")
+        self._register_session(alice, alice_key, "s_b", "eve-o-tool")
+        self._register_session(bob, bob_key, "s_c", "bob-session")
+
+        # Send by name; the target is offline but still accepts mail.
+        status, _, data = self.api_json(
+            "POST",
+            "/client/mailbox",
+            alice_token,
+            body={"session": "s_a", "to": "eve-o-tool", "body": "please work up X"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(data["target"]["id"], "s_b")
+        self.assertFalse(data["target"]["online"])
+        message_id = data["message"]["id"]
+        self.assertEqual(data["message"]["from_name"], "consumer")
+
+        status, _, inbox = self.api_json(
+            "GET", "/client/mailbox?session=s_b", alice_token
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(inbox["unread"], 1)
+        self.assertEqual(inbox["messages"][0]["body"], "please work up X")
+        self.assertEqual(inbox["messages"][0]["from_session_id"], "s_a")
+
+        status, _, sessions = self.api_json("GET", "/client/sessions", alice_token)
+        self.assertEqual(status, 200)
+        by_id = {s["id"]: s for s in sessions["sessions"]}
+        self.assertEqual(by_id["s_b"]["unread"], 1)
+        self.assertEqual(sessions["unread_total"], 1)
+
+        status, _, read = self.api_json(
+            "POST",
+            "/client/mailbox/read",
+            alice_token,
+            body={"session": "s_b", "ids": [message_id]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(read["marked"], 1)
+        status, _, inbox = self.api_json(
+            "GET", "/client/mailbox?session=s_b", alice_token
+        )
+        self.assertEqual(inbox["unread"], 0)
+        self.assertEqual(inbox["messages"], [])
+
+        # Bob cannot see or address Alice's sessions.
+        status, _, _ = self.api_json("GET", "/client/mailbox?session=s_b", bob_token)
+        self.assertEqual(status, 404)
+        status, _, _ = self.api_json(
+            "POST", "/client/mailbox", bob_token, body={"to": "eve-o-tool", "body": "hi"}
+        )
+        self.assertEqual(status, 404)
+
+        # Ambiguous names and name@hostname.
+        self._register_session(alice, alice_key, "s_d", "dup", hostname="one")
+        self._register_session(alice, alice_key, "s_e", "dup", hostname="two")
+        status, _, data = self.api_json(
+            "POST", "/client/mailbox", alice_token, body={"to": "dup", "body": "x"}
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(len(data["error"]["candidates"]), 2)
+        status, _, data = self.api_json(
+            "POST", "/client/mailbox", alice_token, body={"to": "dup@two", "body": "x"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(data["target"]["id"], "s_e")
+
+        # Self-send and unknown targets.
+        status, _, data = self.api_json(
+            "POST",
+            "/client/mailbox",
+            alice_token,
+            body={"session": "s_a", "to": "consumer", "body": "x"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"]["type"], "cannot_message_self")
+        status, _, data = self.api_json(
+            "POST", "/client/mailbox", alice_token, body={"to": "nope", "body": "x"}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"]["type"], "target_not_found")
+        self.assertTrue(data["error"]["available"])
+
+        # Oversize body.
+        status, _, data = self.api_json(
+            "POST",
+            "/client/mailbox",
+            alice_token,
+            body={"to": "eve-o-tool", "body": "x" * 67000},
+        )
+        self.assertEqual(status, 413)
+        self.assertEqual(data["error"]["type"], "message_too_large")
+
+        # Rate limit.
+        self.server.app.message_limiter.limit = 1
+        self.server.app.message_limiter.buckets.clear()
+        status, _, _ = self.api_json(
+            "POST", "/client/mailbox", alice_token, body={"to": "eve-o-tool", "body": "one"}
+        )
+        self.assertEqual(status, 201)
+        status, headers, data = self.api_json(
+            "POST", "/client/mailbox", alice_token, body={"to": "eve-o-tool", "body": "two"}
+        )
+        self.assertEqual(status, 429)
+        self.assertIn("retry-after", headers)
+
+    def test_mailbox_web_api(self):
+        _, key = self.server.create_user_key("alice")
+        alice = self.server.app.db.user_by_username("alice")
+        self._register_session(alice, key, "s_a", "consumer")
+        self._register_session(alice, key, "s_b", "eve-o-tool")
+
+        status, _, data = self.web_json(
+            "POST", "/api/sessions/s_b/messages", body={"body": "hello from web"}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(data["message"]["from_name"], "Alice Example")
+
+        status, _, data = self.web_json("GET", "/api/sessions/s_b/messages")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["messages"][0]["body"], "hello from web")
+        self.assertEqual(data["unread"], 1)
+        message_id = data["messages"][0]["id"]
+
+        status, _, sessions = self.web_json("GET", "/api/sessions")
+        self.assertEqual(status, 200)
+        by_id = {s["id"]: s for s in sessions["sessions"]}
+        self.assertEqual(by_id["s_b"]["unread"], 1)
+        self.assertEqual(sessions["unread_total"], 1)
+
+        status, _, data = self.web_json(
+            "POST", "/api/sessions/s_b/messages/read", body={"ids": [message_id]}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["marked"], 1)
+
+        # A web POST without the CSRF header is rejected.
+        status, _, _ = self.server.request(
+            self.server.web_port,
+            "POST",
+            "/api/sessions/s_b/messages",
+            body={"body": "no csrf"},
+            headers=dict(WEB_HEADERS),
+        )
+        self.assertEqual(status, 403)
+
+        # Messages can be disabled entirely.
+        self.server.app.messages_enabled = False
+        status, _, _ = self.web_json("GET", "/api/sessions/s_b/messages")
+        self.assertEqual(status, 403)
+        self.server.app.messages_enabled = True
+
 
 if __name__ == "__main__":
     unittest.main()

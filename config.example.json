@@ -75,6 +75,13 @@
     "retention_days": 7,
     "admin_groups": ["god"]
   },
+  "messages": {
+    "enabled": true,
+    "retention_days": 30,
+    "max_body_bytes": 65536,
+    "max_unread_per_session": 500,
+    "rate_limit_per_minute": 60
+  },
   "database": {
     "path": "/data/opencloddie.db"
   }

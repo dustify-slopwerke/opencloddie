@@ -115,11 +115,53 @@ several, prints the list and asks for a name.  Ensures the agent is running.
 Lists **all** sessions registered to the API key's account, from every machine:
 
 ```
-NAME                     ID                   ONLINE  MODEL                      CWD                              HOST
-work                     s_9f3a…               yes     deepseek-v4.1-flash        /home/alice/project              laptop
+NAME                     ID                   ONLINE  UNREAD  MODEL                      CWD                              HOST
+work                     s_9f3a…               yes     2       deepseek-v4.1-flash        /home/alice/project              laptop
 ```
 
 A `*local` marker identifies sessions in this machine's `sessions.json`.
+`UNREAD` is the number of unread mailbox messages addressed to that session.
+
+### `opencloddie msg TARGET TEXT...`
+
+Send a message to another session on the same account.  `TARGET` may be an exact
+session id, an exact name, or `name@hostname` when the name is ambiguous.  Inside
+a running session the sender is `OPENCLODDIE_SESSION_ID`; outside, the message is
+attributed to your account.
+
+```bash
+opencloddie msg eve-o-tool "please work up the /v2 endpoint; contract is in docs/api.md"
+opencloddie msg eve-o-tool@buildbox "same name, different host"
+```
+
+`--json` prints the server response.  An offline target still receives the
+message when it next checks its mailbox.
+
+### `opencloddie inbox [--all] [--limit N] [--peek] [--json] [--session ID]`
+
+Read this session's mailbox (unread by default) and mark the returned messages
+read unless `--peek`.  `--all` includes read messages.  `--session` overrides
+`OPENCLODDIE_SESSION_ID`; without either, the command looks for a local session
+matching the current directory.
+
+### Session messaging from Claude
+
+New sessions get an MCP server named `opencloddie` with three tools:
+
+- `list_sessions` — resolve a name, see hosts and unread counts.
+- `send_session_message` — send by name/id/`name@hostname`.
+- `check_mailbox` — read and acknowledge messages addressed to this session.
+
+So you can say *"talk to the eve-o-tool session to work up X"* in one session,
+then *"check your mailbox"* in the other.  Messages are durable and pull-only:
+nothing interrupts a working session.  The runner writes the MCP config when the
+tmux session is created, so sessions started before this feature need
+`opencloddie stop NAME` and `opencloddie run --name NAME -- --continue` to gain
+the tools.  The `msg`/`inbox` commands still work inside older sessions through
+Claude's Bash tool.
+
+Claude Code may ask you to approve the `mcp__opencloddie__*` tools the first
+time they are used; approvals are per session.
 
 ### `opencloddie stop TARGET`
 

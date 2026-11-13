@@ -19,11 +19,21 @@ from .util import safe_username, split_csv
 
 
 class AuthError(Exception):
-    def __init__(self, status: int, message: str, error_type: str = "authentication_error"):
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        error_type: str = "authentication_error",
+        *,
+        headers: dict[str, str] | None = None,
+        extra: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.message = message
         self.error_type = error_type
+        self.headers = headers or {}
+        self.extra = extra or {}
 
 
 @dataclass

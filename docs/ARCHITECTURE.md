@@ -25,6 +25,7 @@ listeners and a watchdog thread:
 │  ├─ /                  UI             ├─ /v1/messages       gateway        │
 │  ├─ /api/me ...        account API    ├─ /v1/models                        │
 │  ├─ /api/sessions      list/delete    ├─ /client/me|sessions  CLI API      │
+│  ├─ /api/sessions/:id/messages mailbox├─ /client/mailbox    mailbox        │
 │  └─ /api/sessions/:id/ws  terminal    ├─ /agent/ws           agent WS      │
 │                                       └─ /install/*          client file   │
 │                                                                            │
@@ -65,6 +66,9 @@ usage_minutes(bucket, user_id, api_key_id, api_key_name, username, model,
 
 instance_minutes(bucket, sessions_online, sessions_total, agents, viewers,
                  rss_bytes, cpu_seconds, threads, db_bytes)
+
+messages(id, user_id, from_session_id, from_name, to_session_id, to_name,
+         body, reply_to, created_at, read_at)
 ```
 
 - Users are created on first web request from `Remote-User`; there is no
@@ -78,6 +82,9 @@ instance_minutes(bucket, sessions_online, sessions_total, agents, viewers,
   the only "server-side" lifecycle action.
 - On startup all sessions are marked offline (no agent can have survived), and
   offline rows older than 90 days are purged.  Agents reconnect and re-upsert.
+- `messages` is a durable, same-account mailbox.  Rows are scoped by `user_id`
+  and outlive session deletion (names are stored as snapshots); retention
+  removes them after `messages.retention_days` (default 30).
 
 ## Gateway request flow
 
@@ -191,6 +198,41 @@ server just deletes the row.
   `{"t":"resize","cols":..,"rows":..}` or `{"t":"ping"}`.
 - The handler owns a `Channel`; a pump thread forwards the channel queue to the
   browser and a reader loop forwards browser input to the agent.
+
+## Session messaging
+
+Sessions exchange durable messages through the server.  Delivery is pull-only:
+the receiving agent calls `check_mailbox`; nothing is pushed into a running
+Claude session, so the agent hub and terminal channels are untouched.
+
+```
+session A (claude)
+  "talk to eve-o-tool…"
+       │ MCP stdio
+       ▼
+opencloddie __mcp ──HTTP bearer──▶ /client/mailbox ──▶ SQLite messages
+                                         ▲
+session B (claude) ──HTTP bearer────────┘
+  "check your mailbox" → __mcp → GET /client/mailbox
+web UI ── /api/sessions/<id>/messages ──┘ (human view/compose)
+```
+
+- The client runner writes a per-session MCP config and passes
+  `--mcp-config <file>` to Claude Code.  `opencloddie __mcp` is a small
+  JSON-RPC 2.0 stdio shim that forwards `list_sessions`,
+  `send_session_message`, and `check_mailbox` to the mailbox HTTP API.  It runs
+  on the client machine, so it works identically for local and remote sessions.
+- Addressing is by session id, exact name, or `name@hostname`.  Names are not
+  unique (they default to the cwd basename), so ambiguity returns 409 with
+  candidates rather than guessing.
+- `check_mailbox` returns unread messages and then acknowledges them; a crash
+  between the two means at-least-once delivery.  The web view never acks
+  implicitly.
+- Same-account only.  Every query includes `user_id`, and route handlers
+  re-check session ownership.  Messages are stored as plaintext and are
+  untrusted content when read by another agent.
+- The `messages` config block controls enablement, retention, body size, unread
+  cap, and a per-user send rate limit.
 
 ## URL derivation
 

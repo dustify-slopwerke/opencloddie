@@ -113,6 +113,7 @@ The client's bootstrap endpoint.
   "context_tokens": 1000000,
   "models": [{"id": "...", "label": "...", "context_tokens": 1000000, "note": "..."}],
   "opencode_key_set": true,
+  "messages_enabled": true,
   "gateway_base_url": "https://cloddie.example.com",
   "web_url": "https://cloddie.example.com",
   "install": {"command": "curl -fsSL .../install/opencloddie ..."}
@@ -127,13 +128,17 @@ then leaves Claude Code's default in place.
 Owner-scoped registry:
 
 ```json
-{"ok":true,"sessions":[{
+{"ok":true,"unread_total":1,"sessions":[{
   "id":"s_9f3a...","name":"work","hostname":"laptop",
   "cwd":"/home/alice/src/api","model":"deepseek-v4.1-flash",
   "online":true,"created_at":"2026-11-07T12:00:00Z",
-  "last_seen_at":"2026-11-07T12:34:56Z","last_seen":"12s ago","viewers":1
+  "last_seen_at":"2026-11-07T12:34:56Z","last_seen":"12s ago","viewers":1,
+  "unread":1
 }]}
 ```
+
+`unread` is the number of unread mailbox messages addressed to that session;
+`unread_total` is the sum across the caller's sessions.
 
 ### `GET /client/sessions/<id>`
 
@@ -143,6 +148,56 @@ Single session in the same shape.
 
 Asks the owning agent to kill its tmux session, then removes the registry row.
 Returns `{"ok":true}`.  404 if the id is not owned by the key's user.
+
+## Session mailbox
+
+A durable, same-account mailbox between sessions.  Delivery is pull-only: the
+receiving session reads with `GET /client/mailbox`; nothing is pushed into a
+running Claude session.  Messages survive server restarts and offline sessions.
+Every query is scoped to the API key's user.
+
+### `POST /client/mailbox`
+
+```json
+{"session": "s_abc", "to": "eve-o-tool", "body": "please work up X", "reply_to": 42}
+```
+
+`session` is the sender's session id (optional for a human CLI call); `to`
+accepts an exact session id, an exact case-insensitive name, or
+`name@hostname`.  `reply_to` is optional.  The target may be offline; the
+message is queued.
+
+```json
+{"ok":true,
+ "message":{"id":43,"from_session_id":"s_abc","from_name":"consumer",
+            "to_session_id":"s_def","to_name":"eve-o-tool","body":"...",
+            "reply_to":null,"created_at":"2026-11-13T12:00:00Z","read_at":null},
+ "target":{"id":"s_def","name":"eve-o-tool","hostname":"buildbox","online":true},
+ "unread":1}
+```
+
+Errors: `messages_disabled` (403), `invalid_request` (400),
+`target_not_found` (404, with `available`), `ambiguous_target` (409, with
+`candidates`), `cannot_message_self` (400), `mailbox_full` (409),
+`message_too_large` (413), `rate_limit_error` (429 with `Retry-After`).
+
+### `GET /client/mailbox?session=<id>&unread=1&limit=20&after=0`
+
+Returns messages addressed to that session, oldest first.  `unread=0` includes
+read messages; `after` pages by message id.  `limit` is capped at 100.
+
+```json
+{"ok":true,"messages":[...],"unread":1,"has_more":false}
+```
+
+### `POST /client/mailbox/read`
+
+```json
+{"session":"s_def","ids":[43,44]}
+```
+
+Marks those messages read (only if addressed to that session and owned by the
+caller).  Returns `{"ok":true,"marked":2}`.
 
 ## Agent WebSocket (`/agent/ws`)
 
@@ -222,6 +277,7 @@ require `X-OpenCloddie-Client: web`, a same-origin `Origin` (when present), and
 {"ok":true,
  "user":{"username":"alice","name":"Alice","email":"a@example.com","groups":["god"],"default_model":"deepseek-v4.1-flash"},
  "opencode_key_set":true,"opencode_key_hint":"***********1234",
+ "messages_enabled":true,
  "models":[...],"default_model":"deepseek-v4.1-flash",
  "urls":{"web":"https://cloddie.example.com","api":"https://cloddie.example.com"},
  "install":{"command":"...","login":"..."}}
@@ -366,6 +422,22 @@ Fetch or kill/remove (same semantics as the client DELETE).
 
 Terminal WebSocket described above.
 
+### `GET /api/sessions/<id>/messages?peer=<id>&limit=50`
+
+The human mailbox view.  Returns messages involving the session (both
+directions); `peer` restricts to one conversation.  Both session ids must be
+owned by the caller.  The payload matches `/client/mailbox`, plus `unread`.
+
+### `POST /api/sessions/<id>/messages`
+
+Send as the web user (no session sender).  Body `{"body":"..."}`.  Requires the
+usual web CSRF header.  Returns 201 with `{"ok":true,"message":...,"unread":n}`.
+
+### `POST /api/sessions/<id>/messages/read`
+
+Body `{"ids":[1,2]}`.  Marks messages addressed to that session read; the web
+view never acks implicitly.
+
 ### `GET /healthz`
 
 `{"ok":true,"version":"0.4.0","mode":"web"}` (no auth).
@@ -388,6 +460,11 @@ Retry-After: 60
 ```
 
 The limit is in-memory per process, adequate for a single-node deployment.
+
+Mailbox sends use a separate per-user sliding window,
+`messages.rate_limit_per_minute` (default 60), and return the same 429 shape
+with `Retry-After`.  Recipients also have an unread cap
+(`messages.max_unread_per_session`, default 500).
 
 ## CORS
 

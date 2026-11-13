@@ -141,6 +141,11 @@ and use `web.dev_user` deliberately.
   another user is rejected, preventing hijack via registration.
 - **Agent metadata** (name, hostname, cwd) is length-limited and NUL-stripped
   before storage; it is rendered with `textContent` in the UI, not HTML.
+- **Mailbox messages** are length-limited (`messages.max_body_bytes`),
+  NUL-stripped, and scoped to the sender's `user_id`.  The web UI renders them
+  with `textContent`; the MCP tool wraps them in explicit delimiters and tells
+  Claude to treat them as data, not instructions.  Messages are stored in
+  plaintext and should not be used for secrets.
 - **Request bodies** are size-limited and must be JSON objects.
 - **Upstream URL** is fixed by operator config; no user-controlled URL is
   fetched (no SSRF surface).
@@ -163,6 +168,10 @@ and use `web.dev_user` deliberately.
 
 - Per-API-key sliding window, 120 requests/minute by default, 429 with
   `Retry-After: 60`.
+- Per-user mailbox send window, 60 messages/minute by default, 429 with
+  `Retry-After`.  Each recipient also has an unread cap
+  (`messages.max_unread_per_session`, default 500) so a looping sender cannot
+  grow the database without bound.
 - Per-message WebSocket limit 16 MiB; per-channel queue bounded at 2048
   messages (a slow viewer is disconnected rather than growing memory).
 - HTTP request body 32 MiB; upstream JSON response read cap 64 MiB.
@@ -188,6 +197,8 @@ also means the rate limiter is per instance, not distributed.
 | Path traversal / static leak | Whitelist + realpath containment |
 | Database theft | OpenCode keys encrypted; API keys hashed; master stored separately |
 | Malicious client agent | Can only control its own user's sessions; cannot read other users' data |
+| Mailbox prompt injection | Same-account only; messages are data-wrapped in the MCP tool and never auto-executed; rate/unread caps bound loops |
+| Mailbox data leak | Every query is scoped by `user_id`; route handlers re-check session ownership |
 | Terminal escape injection to browser | xterm.js renders in a canvas/DOM terminal, not arbitrary HTML; CSP |
 | XSS via session name/cwd | UI uses `textContent`; CSP blocks inline scripts |
 | Upstream SSRF | Fixed operator-configured URL |
@@ -206,6 +217,10 @@ also means the rate limiter is per instance, not distributed.
 - Authelia is a hard dependency for the web UI.  Do not expose the web listener
   without it.
 - The API's `?token=` compatibility path can leak via third-party logs.
+- Mailbox messages are stored in plaintext in SQLite and are visible to anyone
+  who can read the database (or the master secret's host).  They are
+  same-account only and retained for `messages.retention_days` (default 30);
+  do not send credentials through the mailbox.
 
 ## Hardening checklist
 

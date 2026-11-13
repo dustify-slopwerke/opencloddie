@@ -6,7 +6,7 @@ import unittest
 from tests.harness import ROOT  # noqa: F401
 
 from opencloddie.crypto import new_master_secret
-from opencloddie.db import Database
+from opencloddie.db import Database, MailboxFull
 from opencloddie.metrics import UsageDelta
 
 
@@ -135,6 +135,83 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(stats["sessions_online"], 0)
 
 
+    def test_messages_scope_ack_cap_and_purge(self):
+        alice = self.db.ensure_user("alice")
+        bob = self.db.ensure_user("bob")
+        alice_key, _ = self.db.create_api_key(alice["id"], "k", "m")
+        bob_key, _ = self.db.create_api_key(bob["id"], "k", "m")
+        for user, key, session_id, name in (
+            (alice, alice_key, "s_a", "a"),
+            (alice, alice_key, "s_b", "b"),
+            (bob, bob_key, "s_c", "c"),
+        ):
+            self.db.upsert_session(
+                session_id=session_id,
+                user_id=user["id"],
+                api_key_id=key["id"],
+                name=name,
+                hostname="host",
+                cwd="/tmp",
+                model="m",
+                agent_id="a_" + session_id,
+            )
+
+        row = self.db.add_message(
+            user_id=alice["id"],
+            to_session_id="s_b",
+            body="hello",
+            from_session_id="s_a",
+            max_unread=2,
+        )
+        self.assertEqual(row["from_name"], "a")
+        self.assertEqual(row["to_name"], "b")
+        self.assertEqual(self.db.count_unread(alice["id"], "s_b"), 1)
+        self.assertEqual(self.db.unread_counts(alice["id"]), {"s_b": 1})
+        self.assertEqual(self.db.list_messages(alice["id"], "s_b")[0]["body"], "hello")
+        self.assertEqual(self.db.list_messages(bob["id"], "s_b"), [])
+        self.assertEqual(self.db.get_message(alice["id"], row["id"])["body"], "hello")
+        self.assertIsNone(self.db.get_message(bob["id"], row["id"]))
+
+        # A user cannot mark another user's messages read.
+        self.assertEqual(self.db.mark_messages_read(bob["id"], "s_b", [row["id"]]), 0)
+        self.assertEqual(self.db.mark_messages_read(alice["id"], "s_b", [row["id"]]), 1)
+        self.assertEqual(self.db.count_unread(alice["id"], "s_b"), 0)
+
+        # The cap counts unread messages only.
+        self.db.add_message(
+            user_id=alice["id"],
+            to_session_id="s_b",
+            body="one",
+            from_session_id="s_a",
+            max_unread=1,
+        )
+        with self.assertRaises(MailboxFull):
+            self.db.add_message(
+                user_id=alice["id"],
+                to_session_id="s_b",
+                body="two",
+                from_session_id="s_a",
+                max_unread=1,
+            )
+
+        # Replies show up in both directions.
+        self.db.add_message(
+            user_id=alice["id"],
+            to_session_id="s_a",
+            body="hi",
+            from_session_id="s_b",
+        )
+        conversation = self.db.list_conversation(alice["id"], "s_a", "s_b")
+        self.assertEqual([m["body"] for m in conversation], ["hello", "one", "hi"])
+
+        # The recipient must belong to the sender's user.
+        with self.assertRaises(LookupError):
+            self.db.add_message(user_id=bob["id"], to_session_id="s_b", body="x")
+
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute("UPDATE messages SET created_at='2000-01-01T00:00:00Z'")
+        self.assertEqual(self.db.purge_messages(1), 3)
+
     def test_metrics_schema_migrates_from_v1(self):
         path = os.path.join(self.tmp, "old.db")
         conn = sqlite3.connect(path)
@@ -155,10 +232,11 @@ class DatabaseTest(unittest.TestCase):
             }
             self.assertIn("usage_minutes", tables)
             self.assertIn("instance_minutes", tables)
+            self.assertIn("messages", tables)
             version = db.conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0]
-            self.assertEqual(version, "2")
+            self.assertEqual(version, "3")
         finally:
             db.close()
 
