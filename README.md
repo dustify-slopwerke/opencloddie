@@ -20,7 +20,9 @@ opencloddie is three things in one small, dependency-free service:
 3. **A tabbed/tiled web app** (behind nginx + Authelia) to switch between all
    your connected sessions, generate API keys, choose models, manage your
    OpenCode key, and monitor gateway usage, tokens, sessions, and process
-   health in a Statistics view (with persisted 1h/6h/24h/7d history).
+   health in a Statistics view (with persisted 1h/6h/24h/7d history).  Three
+   thin bars in the session toolbar show the account's rolling / weekly /
+   monthly Go quota.
 
 Sessions can message each other through a durable, same-account mailbox.  Say
 *"talk to the eve-o-tool session to work up X"* in one session, then *"check your

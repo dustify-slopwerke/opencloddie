@@ -13,6 +13,8 @@ const state = {
   layout: 'single',
   terminals: new Map(),
   poll: null,
+  usage: null,
+  usagePoll: null,
   booted: false,
 };
 
@@ -431,6 +433,7 @@ async function boot() {
   applyLayoutChrome();
   await loadSessions();
   await loadSystem();
+  loadUsage();
   setView('sessions');
   $('#booting').hidden = true;
   $('#app').hidden = false;
@@ -449,8 +452,14 @@ async function boot() {
   state.poll = setInterval(() => {
     if (!document.hidden) loadSessions({ quiet: true });
   }, 5000);
+  state.usagePoll = setInterval(() => {
+    if (!document.hidden && state.view === 'sessions') loadUsage();
+  }, 60000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) loadSessions({ quiet: true });
+    if (!document.hidden) {
+      loadSessions({ quiet: true });
+      if (state.view === 'sessions') loadUsage();
+    }
   });
 }
 
@@ -516,6 +525,55 @@ function formatUptime(seconds) {
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
 }
 
+/* ------------------------------------------------------------- usage bars */
+const USAGE_LABELS = { rolling: 'Rolling', weekly: 'Weekly', monthly: 'Monthly' };
+
+function usageReset(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function renderUsage() {
+  const root = $('#usage-bars');
+  if (!root) return;
+  const usage = state.usage;
+  root.hidden = state.view !== 'sessions' || !usage;
+  if (!usage) return;
+  for (const [id, label] of Object.entries(USAGE_LABELS)) {
+    const bar = root.querySelector(`[data-bucket="${id}"]`);
+    if (!bar) continue;
+    const item = usage[id] || {};
+    const pct = typeof item.percent === 'number' ? item.percent : null;
+    bar.classList.toggle('is-warn', pct !== null && pct >= 80);
+    bar.classList.toggle('is-danger', pct !== null && pct >= 95);
+    bar.firstElementChild.style.width = pct === null ? '0%' : `${pct}%`;
+    const used = pct === null ? 'usage unavailable' : `${Math.round(pct)}% used`;
+    const reset = usageReset(item.resets_at);
+    const text = `${label} quota: ${used}${reset ? ` · resets ${reset}` : ''}`;
+    bar.setAttribute('aria-label', text);
+    bar.title = text;
+  }
+}
+
+async function loadUsage() {
+  if (!state.me || !state.me.opencode_key_set) {
+    state.usage = null;
+    renderUsage();
+    return;
+  }
+  try {
+    const data = await api('/api/usage');
+    state.usage = data && data.ok ? data.usage : null;
+  } catch (_) {
+    state.usage = null;
+  }
+  renderUsage();
+}
+
 /* ---------------------------------------------------------------- views */
 const VIEWS = {
   sessions: { title: 'Sessions', subtitle: () => `${state.sessions.filter((s) => s.online).length} online · ${state.sessions.length} total` },
@@ -535,6 +593,7 @@ function setView(view) {
   $('#view-title').textContent = VIEWS[view].title;
   $('#view-subtitle').textContent = VIEWS[view].subtitle();
   renderTopbar();
+  renderUsage();
   if (window.StatsView) {
     if (view === 'stats') StatsView.show();
     else StatsView.hide();
@@ -546,6 +605,7 @@ function setView(view) {
   }
   if (view === 'sessions') {
     loadSessions({ quiet: true });
+    if (state.booted) loadUsage();
     if (state.layout === 'tile') {
       requestAnimationFrame(() => layoutTiles());
     } else {
@@ -1560,6 +1620,7 @@ async function saveOpencodeKey() {
     toast('OpenCode key saved');
     state.me = await api('/api/me');
     renderSettings();
+    loadUsage();
   } catch (err) { toast(err.message, 'error'); }
   finally { button.disabled = false; }
 }
@@ -1586,6 +1647,7 @@ async function removeOpencodeKey() {
     toast('OpenCode key removed');
     state.me = await api('/api/me');
     renderSettings();
+    loadUsage();
   } catch (err) { toast(err.message, 'error'); }
 }
 

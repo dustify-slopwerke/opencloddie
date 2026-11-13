@@ -274,5 +274,43 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(rates[identity.key_id]["remaining"], 0)
 
 
+    def test_usage_fetch_normalizes_and_caches(self):
+        gateway = self.server.app.gateway
+        usage = gateway.usage("oc_sk_usage_key")
+        self.assertEqual(usage["rolling"]["percent"], 10.0)
+        self.assertEqual(usage["weekly"]["percent"], 28.0)
+        self.assertEqual(usage["monthly"]["percent"], 65.0)
+        self.assertEqual(usage["monthly"]["resets_at"], "2026-11-28T05:53:42.000Z")
+        self.assertEqual(self.upstream.gets[0]["path"], "/inference/go/v1/usage")
+        self.assertEqual(
+            self.upstream.gets[0]["headers"]["authorization"], "Bearer oc_sk_usage_key"
+        )
+        self.assertIn("user-agent", self.upstream.gets[0]["headers"])
+
+        # A second call inside the cache window does not hit upstream.
+        gateway.usage("oc_sk_usage_key")
+        self.assertEqual(len(self.upstream.gets), 1)
+
+    def test_usage_reports_rejection_and_malformed_payload(self):
+        gateway = self.server.app.gateway
+        self.upstream.usage_status = 403
+        with self.assertRaises(GatewayError) as ctx:
+            gateway.usage("oc_sk_rejected")
+        self.assertEqual(ctx.exception.status, 502)
+        self.assertNotIn("oc_sk_rejected", ctx.exception.message)
+
+        self.upstream.usage_status = 200
+        self.upstream.usage_payload = {"usage": {}}
+        with self.assertRaises(GatewayError):
+            gateway.usage("oc_sk_no_windows")
+
+    def test_usage_x_api_key_auth_style(self):
+        self.server.cfg["gateway"]["auth_style"] = "x-api-key"
+        self.server.app.gateway.usage("oc_sk_x_style")
+        headers = self.upstream.gets[0]["headers"]
+        self.assertEqual(headers["x-api-key"], "oc_sk_x_style")
+        self.assertNotIn("authorization", headers)
+
+
 if __name__ == "__main__":
     unittest.main()

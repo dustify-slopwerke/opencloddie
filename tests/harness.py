@@ -47,9 +47,18 @@ class FakeUpstream:
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.gets: list[dict[str, Any]] = []
         self.status = 200
         self.mode = "json"
         self.fail_first_status: int | None = None
+        self.usage_status = 200
+        self.usage_payload: Any = {
+            "usage": {
+                "rolling": {"status": "ok", "percent": 10, "resetsAt": "2026-11-13T19:42:23.000Z"},
+                "weekly": {"status": "ok", "percent": 28, "resetsAt": "2026-11-16T00:00:00.000Z"},
+                "monthly": {"status": "ok", "percent": 65, "resetsAt": "2026-11-28T05:53:42.000Z"},
+            }
+        }
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -117,6 +126,26 @@ class FakeUpstream:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("x-request-id", "upstream-request-1")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:  # noqa: N802
+                outer.gets.append(
+                    {
+                        "path": self.path,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                    }
+                )
+                if outer.usage_status != 200:
+                    payload = json.dumps(
+                        {"type": "error", "error": {"type": "api_error", "message": "denied"}}
+                    ).encode()
+                    self.send_response(outer.usage_status)
+                else:
+                    payload = json.dumps(outer.usage_payload).encode()
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
 

@@ -609,6 +609,25 @@ class Handler(BaseHTTPRequestHandler):
             result = app.gateway.test_opencode_key(key, model)
             return self._send_json(200, {"ok": bool(result["ok"]), "result": result})
 
+        if path == "/api/usage" and method in ("GET", "HEAD"):
+            encrypted = app.db.user_secret(identity.user_id)
+            if not encrypted:
+                return self._send_json(200, {"ok": True, "usage": None, "reason": "no_key"})
+            try:
+                key = decrypt_secret(encrypted, app.cfg["secrets"]["master"])
+            except ValueError:
+                return self._send_json(
+                    200, {"ok": False, "usage": None, "reason": "key_unreadable"}
+                )
+            try:
+                usage = app.gateway.usage(key)
+            except GatewayError as exc:
+                return self._send_json(
+                    200,
+                    {"ok": False, "usage": None, "reason": "upstream_error", "error": exc.message},
+                )
+            return self._send_json(200, {"ok": True, "usage": usage})
+
         if path == "/api/settings" and method in ("PUT", "POST"):
             body = self._json_body()
             model = normalize_model(app.models, body.get("default_model"), app.default_model)

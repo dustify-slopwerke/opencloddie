@@ -2,65 +2,28 @@
 
 ## OpenCode usage indicator
 
-**Goal:** stacked horizontal bars at the top of the web UI showing Go usage for
-the rolling (5-hour), weekly, and monthly windows.
+**Implemented (2026-11-13).**  Three thin bars in the session toolbar (left of
+the Single/Tile toggle) show the rolling (5-hour), weekly, and monthly Go
+windows; tooltips carry the percentage and reset time.  Backend:
+`GET /api/usage` (`docs/API.md`) calls
+`https://opencode.ai/inference/go/v1/usage` with the user's stored inference
+key, normalizes the result to `{rolling, weekly, monthly}`, and caches it for
+60 seconds.
 
-### What the docs say
+Notes from the probe:
 
-- Go limits are monthly dollar amounts per model.
-- The windows are percentages of a model's monthly limit: **5-hour = 20%**,
-  **weekly = 50%**, **monthly = 100%**.
-- Every inference response includes `usage.opencode.allowance` — how much the
-  request counted toward the plan, in dollars — plus `billing_source`.
-- Console API keys can have a **Usage: Read** permission (Restricted keys:
-  `Models: Request` + `Usage: Read`).
+- The Console endpoint (`/console/api/activity/usage`) needs a **Usage: Read**
+  permission, but the inference endpoint above works with the normal key — no
+  key change is required.
+- opencode.ai is behind Cloudflare and returns **error 1010
+  (`browser_signature_banned`)** to Python-urllib's default User-Agent.  Send
+  `gateway.user_agent` (default `opencloddie-gateway/0.1`); curl's UA is fine.
+- Response shape:
+  `{"usage":{"rolling":{"status","percent","resetsAt"}, ...}}`.
+- Bar color: accent below 80%, warn 80–94%, danger 95%+.
 
-### Endpoint check (2026-11-08)
-
-```
-GET https://opencode.ai/console/api/activity/usage
-  Authorization: Bearer <oc_sk_...>
-```
-
-| Key | Result |
-| --- | --- |
-| current inference key | `403 {"_tag":"Forbidden"}` |
-| invalid key | `401 {"_tag":"Unauthorized"}` |
-| no key | `401 {"_tag":"Unauthorized"}` |
-
-So the endpoint is real, accepts bearer keys, and the current key lacks
-**Usage: Read**. A few guessed paths (`/console/api/go/limits`,
-`/console/api/usage`, …) are 404; the activity endpoint is the one.
-
-### Next steps
-
-1. In the OpenCode Console, edit the key (owner/admin) or create a new
-   personal/service-account key with:
-   - `Models: Request` (so inference still works), and
-   - `Usage: Read`.
-2. Paste it in opencloddie **Settings → OpenCode key** (never in chat). The
-   same key can keep serving inference.
-3. Capture one successful response from `/console/api/activity/usage` to learn
-   its query parameters and shape (range, per-window fields, plan limits).
-4. Implement:
-   - `GET /api/usage` on the **web** listener (cookie/Remote-User auth), which
-     decrypts the user's stored OpenCode key, calls the Console endpoint
-     server-side, caches for ~60s, and returns a normalized payload.
-   - On 403, return `usage_permission_required` so the UI can show a short
-     "grant Usage: Read" state instead of bars.
-   - Top-bar component: three stacked bars (rolling / weekly / monthly),
-     with tooltips showing used/limit and reset time.
-   - Do not expose the OpenCode key or raw console response to the browser
-     beyond the normalized numbers.
-5. Add tests with a fake usage upstream: permission-required, success, cache,
-   malformed payload, and user scoping.
-
-### Fallback if no Usage: Read is possible
-
-Accumulate `usage.opencode.allowance` from gateway responses per user/model and
-compare against the configured monthly limit. This only reflects traffic
-through opencloddie, not other clients or the console, so label it "observed"
-rather than account usage.
+The older fallback (accumulate `usage.opencode.allowance` from gateway
+responses) is not needed.
 
 ## Terminal tab order
 

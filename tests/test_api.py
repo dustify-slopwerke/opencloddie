@@ -83,7 +83,7 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         text = body.decode()
-        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert", 'id="layout-toggle"', 'data-view="stats"', 'id="view-stats"'):
+        for needle in ('id="menu-btn"', 'id="drawer-backdrop"', 'id="rail"', "inert", 'id="layout-toggle"', 'id="usage-bars"', 'data-view="stats"', 'id="view-stats"'):
             self.assertIn(needle, text)
         status, _, js = self.server.request(self.server.web_port, "GET", "/app.js")
         self.assertEqual(status, 200)
@@ -91,6 +91,7 @@ class ApiTest(unittest.TestCase):
         self.assertIn(b"function closeDrawer", js)
         self.assertIn(b"function computeGrid", js)
         self.assertIn(b"function layoutTiles", js)
+        self.assertIn(b"function loadUsage", js)
         status, _, stats_js = self.server.request(self.server.web_port, "GET", "/stats.js")
         self.assertEqual(status, 200)
         self.assertIn(b"StatsView", stats_js)
@@ -98,6 +99,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b".rail.is-open", css)
         self.assertIn(b".terminals.tiled", css)
+        self.assertIn(b".usage-bars", css)
         self.assertIn(b"scrollbar-width: none", css)
         self.assertIn(b".stat-grid", css)
         self.assertIn(b"scrollback: 0", js)
@@ -118,6 +120,33 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _, me = self.web_json("GET", "/api/me")
         self.assertFalse(me["opencode_key_set"])
+
+    def test_usage_endpoint(self):
+        status, _, data = self.web_json("GET", "/api/usage")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["usage"])
+        self.assertEqual(data["reason"], "no_key")
+
+        status, _, _ = self.web_json("PUT", "/api/opencode-key", {"key": "oc_sk_usage_secret"})
+        self.assertEqual(status, 200)
+        status, _, data = self.web_json("GET", "/api/usage")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["usage"]["rolling"]["percent"], 10.0)
+        self.assertEqual(data["usage"]["weekly"]["percent"], 28.0)
+        self.assertEqual(data["usage"]["monthly"]["percent"], 65.0)
+        self.assertEqual(self.upstream.gets[-1]["path"], "/inference/go/v1/usage")
+        self.assertNotIn("oc_sk_usage_secret", json.dumps(data))
+
+        # A rejection upstream is reported as a soft failure, not a key leak.
+        self.web_json("PUT", "/api/opencode-key", {"key": "oc_sk_usage_secret_2"})
+        self.upstream.usage_status = 403
+        status, _, data = self.web_json("GET", "/api/usage")
+        self.assertEqual(status, 200)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["reason"], "upstream_error")
+        self.assertNotIn("oc_sk_usage_secret_2", json.dumps(data))
 
     # ---------------------------------------------------------------- keys
     def test_api_key_lifecycle_and_csrf(self):

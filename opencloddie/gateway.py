@@ -55,6 +55,8 @@ REQUEST_DROP = HOP_BY_HOP | {
 }
 RESPONSE_DROP = HOP_BY_HOP | {"content-length", "content-encoding", "set-cookie"}
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504, 529}
+USAGE_WINDOWS = ("rolling", "weekly", "monthly")
+USAGE_CACHE_SECONDS = 60
 
 
 class GatewayError(Exception):
@@ -196,6 +198,8 @@ class Gateway:
         self.model_ids = set(model_ids(self.models))
         self._rate_lock = threading.Lock()
         self._rate: dict[str, collections.deque[float]] = {}
+        self._usage_lock = threading.Lock()
+        self._usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         parsed = urlsplit(self.gateway_cfg["upstream"])
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError("gateway.upstream must be an http(s) URL")
@@ -275,6 +279,100 @@ class Gateway:
         if not key:
             raise GatewayError(400, "OpenCode API key is empty; re-save it in the web UI")
         return key
+
+    # --------------------------------------------------------------- usage
+    def usage_path(self) -> str:
+        """Upstream path of the quota endpoint.
+
+        The Messages API lives at `<root>/anthropic`; the usage endpoint is a
+        sibling of that segment at `<root>/v1/usage`.
+        """
+        base = self.upstream_base
+        root = base.rsplit("/", 1)[0] if "/" in base else ""
+        return f"{root}/v1/usage"
+
+    def usage(self, key: str) -> dict[str, Any]:
+        """Fetch quota usage for one OpenCode key.
+
+        Returns normalized percentages per window, cached briefly so several
+        browser tabs do not each hit upstream.  Raises `GatewayError` when the
+        upstream is unreachable or the payload is unusable.
+        """
+        cache_key = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        now = time.time()
+        with self._usage_lock:
+            cached = self._usage_cache.get(cache_key)
+            if cached is not None and now - cached[0] < USAGE_CACHE_SECONDS:
+                return cached[1]
+
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "User-Agent": str(self.gateway_cfg.get("user_agent") or "opencloddie"),
+        }
+        if self.gateway_cfg.get("auth_style") == "x-api-key":
+            headers["x-api-key"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+
+        conn = None
+        try:
+            conn = (
+                http.client.HTTPSConnection
+                if self.upstream_scheme == "https"
+                else http.client.HTTPConnection
+            )(self.upstream_host, self.upstream_port, timeout=15)
+            conn.request("GET", self.usage_path(), headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read(65536)
+            if resp.status == 401 or resp.status == 403:
+                raise GatewayError(
+                    502, "the stored OpenCode key was rejected by the usage endpoint", "api_error"
+                )
+            if resp.status != 200:
+                raise GatewayError(
+                    502, f"usage endpoint returned HTTP {resp.status}", "api_error"
+                )
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise GatewayError(
+                    502, "usage endpoint returned invalid JSON", "api_error"
+                ) from exc
+            raw_usage = payload.get("usage") if isinstance(payload, dict) else None
+            if not isinstance(raw_usage, dict):
+                raise GatewayError(502, "usage endpoint returned no usage object", "api_error")
+            usage: dict[str, Any] = {}
+            for window in USAGE_WINDOWS:
+                item = raw_usage.get(window)
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    percent = float(item.get("percent"))
+                except (TypeError, ValueError):
+                    percent = None
+                usage[window] = {
+                    "status": str(item.get("status") or ""),
+                    "percent": None if percent is None else max(0.0, min(100.0, percent)),
+                    "resets_at": item.get("resetsAt"),
+                }
+            if not usage:
+                raise GatewayError(502, "usage endpoint returned no known windows", "api_error")
+        except GatewayError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise GatewayError(
+                502,
+                f"could not reach the OpenCode usage endpoint ({type(exc).__name__})",
+                "api_error",
+            ) from exc
+        finally:
+            if conn is not None:
+                conn.close()
+
+        with self._usage_lock:
+            self._usage_cache[cache_key] = (time.time(), usage)
+        return usage
 
     # --------------------------------------------------------------- proxy
     def proxy(

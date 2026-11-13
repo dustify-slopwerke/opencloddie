@@ -363,6 +363,33 @@ returns the requested (or nearest allowed) range and its resolution in
 
 Version, uptime, URLs, model catalogue, upstream/auth style, hub counts.
 
+### `GET /api/usage`
+
+Live Go quota for the signed-in user's stored OpenCode key — the same key the
+gateway bills.  The server calls `<upstream root>/v1/usage` (for the default
+upstream, `https://opencode.ai/inference/go/v1/usage`) with the stored key and
+caches the result for 60 seconds.  The key and the raw upstream response never
+reach the browser.
+
+```json
+{"ok":true,"usage":{
+  "rolling":{"status":"ok","percent":10.0,"resets_at":"2026-11-13T19:42:23.000Z"},
+  "weekly":{"status":"ok","percent":28.0,"resets_at":"2026-11-16T00:00:00.000Z"},
+  "monthly":{"status":"ok","percent":65.0,"resets_at":"2026-11-28T05:53:42.000Z"}}}
+```
+
+`percent` is clamped to 0–100; windows missing from the upstream response are
+omitted.  Failures are soft — HTTP 200 with `"ok":false`, `"usage":null`, and a
+`reason`:
+
+| `reason` | Meaning |
+| --- | --- |
+| `no_key` | no OpenCode key is saved for this user |
+| `key_unreadable` | the stored key cannot be decrypted; re-save it |
+| `upstream_error` | upstream rejected the key, returned a bad payload, or was unreachable (`error` has a short message) |
+
+The web UI hides the quota bars when `ok` is false.
+
 ### `PUT /api/opencode-key`
 
 ```json
