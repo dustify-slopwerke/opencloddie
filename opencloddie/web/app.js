@@ -11,6 +11,7 @@ const state = {
   activeId: null,
   view: 'sessions',
   layout: 'single',
+  hidden: new Set(),
   terminals: new Map(),
   poll: null,
   usage: null,
@@ -20,6 +21,7 @@ const state = {
 
 const TMUX_BUFFER_FRESH_SECONDS = 120;
 const UTF8 = new TextEncoder();
+let hiddenMenuEl = null;
 
 const TERM_THEME = {
   background: '#07090c',
@@ -430,6 +432,7 @@ async function boot() {
   state.layout = safeStorageGet('opencloddie.layout') === 'tile' ? 'tile' : 'single';
   // Phones keep a single terminal; the toggle is hidden at this width.
   if (window.matchMedia('(max-width: 520px)').matches) state.layout = 'single';
+  restoreHiddenSessions();
   applyLayoutChrome();
   await loadSessions();
   await loadSystem();
@@ -584,6 +587,7 @@ const VIEWS = {
 
 function setView(view) {
   state.view = view;
+  closeHiddenMenu();
   $$('.nav-item').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
   $('#layout-toggle').hidden = view !== 'sessions';
   for (const name of Object.keys(VIEWS)) {
@@ -620,22 +624,34 @@ function renderTopbar() {
   clear(root);
   if (state.view === 'sessions') {
     const active = activeSession();
+    if (state.me && state.me.messages_enabled !== false) {
+      root.append(
+        h('button', { class: 'btn btn-sm', text: 'Mailbox', title: 'Read and send session messages', onclick: () => mailboxModal() }),
+      );
+    }
     if (active) {
       root.append(
         h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selection, recent tmux buffer, or visible screen', onclick: copySelection }),
-        h('button', { class: 'btn btn-sm', text: 'tmux', title: 'Copy the tmux selection buffer (any age)', onclick: () => requestTmuxBuffer(state.terminals.get(state.activeId), 'manual') }),
-        h('button', { class: 'btn btn-ghost btn-sm', text: 'Copy attach', onclick: () => copyText(`opencloddie attach ${quoteArg(active.name)}`) }),
-        h('button', { class: 'btn btn-danger btn-sm', text: 'Kill session', onclick: () => killSession(active) }),
       );
     }
-    root.append(
-      h('button', { class: 'btn btn-ghost btn-sm', text: 'Refresh', onclick: () => loadSessions() }),
-      h('button', { class: 'btn btn-primary btn-sm', text: 'Connect session', onclick: connectModal }),
-    );
-    if (state.me && state.me.messages_enabled !== false) {
-      root.prepend(
-        h('button', { class: 'btn btn-sm', text: 'Mailbox', title: 'Read and send session messages', onclick: () => mailboxModal() }),
+    if (state.layout === 'tile' && state.hidden.size) {
+      root.append(
+        h('button', {
+          class: 'btn btn-sm',
+          id: 'hidden-menu-btn',
+          text: `Hidden (${state.hidden.size})`,
+          title: 'Show sessions hidden from the tile grid',
+          'aria-haspopup': 'menu',
+          'aria-expanded': String(Boolean(hiddenMenuEl)),
+          onclick: (event) => {
+            event.stopPropagation();
+            toggleHiddenMenu(event.currentTarget);
+          },
+        }),
       );
+    }
+    if (active) {
+      root.append(h('button', { class: 'btn btn-danger btn-sm', text: 'Kill session', onclick: () => killSession(active) }));
     }
   } else if (state.view === 'stats') {
     if (window.StatsView) {
@@ -676,6 +692,7 @@ function renderLayoutToggle() {
 
 function setLayout(mode, { persist = true } = {}) {
   if (mode !== 'single' && mode !== 'tile') return;
+  closeHiddenMenu();
   state.layout = mode;
   if (persist) safeStorageSet('opencloddie.layout', mode);
   applyLayoutChrome();
@@ -683,16 +700,18 @@ function setLayout(mode, { persist = true } = {}) {
     const preferred = state.sessions.find((s) => s.online) || state.sessions[0];
     state.activeId = preferred.id;
   }
-  renderTopbar();
   if (mode === 'tile') {
     layoutTiles();
+    renderTopbar();
     return;
   }
+  renderTopbar();
   if (state.activeId) {
     activate(state.activeId, { quiet: true });
   } else {
     $('#empty').hidden = false;
     $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = true;
     $('#status-active').textContent = 'No session selected';
   }
 }
@@ -730,15 +749,36 @@ function computeGrid(count, width, height) {
 function layoutTiles() {
   if (state.layout !== 'tile') return;
   const root = $('#terminals');
-  const sessions = state.sessions;
-  if (!sessions.length) {
+  const sessions = visibleSessions();
+  if (!state.sessions.length) {
+    for (const entry of state.terminals.values()) entry.el.classList.add('hidden');
     $('#empty').hidden = false;
     $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = true;
     $('#status-active').textContent = 'No session selected';
+    return;
+  }
+  if (!sessions.length) {
+    for (const entry of state.terminals.values()) entry.el.classList.add('hidden');
+    state.activeId = null;
+    $('#empty').hidden = true;
+    $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = false;
+    $('#status-active').textContent = 'All sessions hidden';
     return;
   }
   $('#empty').hidden = true;
   $('#session-overlay').hidden = true;
+  $('#hidden-overlay').hidden = true;
+  if (!state.activeId || state.hidden.has(state.activeId)) {
+    const next = pickActiveSession();
+    state.activeId = next ? next.id : null;
+    if (next) safeStorageSet('opencloddie.active', next.id);
+  }
+  const visibleIds = new Set(sessions.map((session) => session.id));
+  for (const [id, entry] of state.terminals) {
+    entry.el.classList.toggle('hidden', !visibleIds.has(id));
+  }
   const grid = computeGrid(sessions.length, root.clientWidth, root.clientHeight);
   root.style.setProperty('--tile-cols', String(grid.cols));
   root.style.setProperty('--tile-rows', String(grid.rows));
@@ -792,7 +832,18 @@ async function loadSessions({ quiet = false } = {}) {
   }
   const previous = new Map(state.sessions.map((s) => [s.id, s]));
   const previousActive = state.activeId;
+  const previousHidden = state.hidden.size;
   state.sessions = data.sessions || [];
+  // Forget hidden ids for sessions that no longer exist anywhere.
+  let hiddenChanged = false;
+  const knownIds = new Set(state.sessions.map((s) => s.id));
+  for (const id of Array.from(state.hidden)) {
+    if (!knownIds.has(id)) {
+      state.hidden.delete(id);
+      hiddenChanged = true;
+    }
+  }
+  if (hiddenChanged) saveHiddenSessions();
   for (const session of state.sessions) {
     const entry = state.terminals.get(session.id);
     if (entry) {
@@ -822,6 +873,7 @@ async function loadSessions({ quiet = false } = {}) {
     } else {
       $('#empty').hidden = false;
       $('#session-overlay').hidden = true;
+      $('#hidden-overlay').hidden = true;
       $('#status-active').textContent = 'No session selected';
     }
   } else if (state.activeId) {
@@ -829,16 +881,149 @@ async function loadSessions({ quiet = false } = {}) {
   } else {
     $('#empty').hidden = false;
     $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = true;
     $('#status-active').textContent = 'No session selected';
   }
   updateSubtitle();
   // A new session can become active without a tab click (the first session,
   // or the active one disappearing).  Rebuild the action bar in that case.
-  if (!quiet || previousActive !== state.activeId) renderTopbar();
+  if (!quiet || previousActive !== state.activeId || previousHidden !== state.hidden.size) renderTopbar();
 }
 
 function activeSession() {
   return state.sessions.find((session) => session.id === state.activeId) || null;
+}
+
+/* Hidden sessions are omitted from the tile grid only; tabs still list them.
+   The set is persisted so the tile selection survives a reload. */
+function restoreHiddenSessions() {
+  state.hidden = new Set();
+  try {
+    const saved = JSON.parse(safeStorageGet('opencloddie.hidden') || '[]');
+    if (Array.isArray(saved)) {
+      for (const id of saved) if (typeof id === 'string') state.hidden.add(id);
+    }
+  } catch (_) { /* corrupt value: start fresh */ }
+}
+
+function saveHiddenSessions() {
+  safeStorageSet('opencloddie.hidden', JSON.stringify(Array.from(state.hidden)));
+  if (!hiddenMenuEl) return;
+  if (state.hidden.size) renderHiddenMenu();
+  else closeHiddenMenu();
+}
+
+function visibleSessions() {
+  return state.sessions.filter((session) => !state.hidden.has(session.id));
+}
+
+function pickActiveSession() {
+  const visible = visibleSessions();
+  return visible.find((s) => s.online) || visible[0] || null;
+}
+
+function hideSession(id) {
+  if (!state.sessions.some((s) => s.id === id)) return;
+  state.hidden.add(id);
+  saveHiddenSessions();
+  if (state.activeId === id) {
+    const next = pickActiveSession();
+    state.activeId = next ? next.id : null;
+    if (next) safeStorageSet('opencloddie.active', next.id);
+  }
+  if (state.layout === 'tile') layoutTiles();
+  renderTabs();
+  renderTopbar();
+  updateSubtitle();
+}
+
+function showSession(id, { focus = true } = {}) {
+  if (!state.hidden.delete(id)) return;
+  saveHiddenSessions();
+  if (state.layout === 'tile') {
+    if (focus) {
+      state.activeId = id;
+      safeStorageSet('opencloddie.active', id);
+    }
+    layoutTiles();
+    if (focus) {
+      requestAnimationFrame(() => {
+        const entry = state.terminals.get(id);
+        if (entry) {
+          fitTerminal(entry);
+          focusTerminal(entry);
+        }
+      });
+    }
+  } else {
+    renderTabs();
+  }
+  renderTopbar();
+  updateSubtitle();
+}
+
+function showAllSessions() {
+  if (!state.hidden.size) return;
+  state.hidden.clear();
+  saveHiddenSessions();
+  const next = pickActiveSession();
+  if (!state.activeId && next) {
+    state.activeId = next.id;
+    safeStorageSet('opencloddie.active', next.id);
+  }
+  if (state.layout === 'tile') layoutTiles();
+  renderTabs();
+  renderTopbar();
+  updateSubtitle();
+}
+
+/* ------------------------------------------------------- hidden menu */
+function closeHiddenMenu() {
+  if (!hiddenMenuEl) return;
+  hiddenMenuEl.remove();
+  hiddenMenuEl = null;
+  const button = $('#hidden-menu-btn');
+  if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function renderHiddenMenu() {
+  if (!hiddenMenuEl) return;
+  const sessions = state.sessions.filter((session) => state.hidden.has(session.id));
+  clear(hiddenMenuEl);
+  if (!sessions.length) {
+    hiddenMenuEl.append(h('div', { class: 'hidden-menu-empty', text: 'No hidden sessions' }));
+    return;
+  }
+  for (const session of sessions) {
+    hiddenMenuEl.append(
+      h('button', {
+        class: 'hidden-menu-item',
+        type: 'button',
+        role: 'menuitem',
+        title: `${session.name}\n${session.hostname || 'unknown host'} · ${session.cwd || '—'}`,
+        onclick: () => { showSession(session.id); closeHiddenMenu(); },
+      },
+        h('span', { class: `dot ${session.online ? 'online' : ''}`.trim() }),
+        h('span', { class: 'hidden-menu-name', text: session.name }),
+        h('span', { class: 'hidden-menu-show', text: 'Show' }),
+      ),
+    );
+  }
+}
+
+function toggleHiddenMenu(anchor) {
+  if (hiddenMenuEl) { closeHiddenMenu(); return; }
+  const menu = h('div', { class: 'hidden-menu', role: 'menu', 'aria-label': 'Hidden sessions' });
+  hiddenMenuEl = menu;
+  renderHiddenMenu();
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  menu.style.top = `${Math.round(rect.bottom + 6)}px`;
+  menu.style.left = `${Math.round(Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)))}px`;
+  anchor.setAttribute('aria-expanded', 'true');
+  const first = menu.querySelector('button');
+  if (first) first.focus();
 }
 
 function updateSubtitle() {
@@ -881,8 +1066,9 @@ function activate(id, { quiet = false } = {}) {
   if (state.layout === 'tile') {
     $('#empty').hidden = true;
     $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = true;
     const entry = ensureTerminal(session);
-    entry.el.classList.remove('hidden');
+    if (!state.hidden.has(session.id)) entry.el.classList.remove('hidden');
     updateTileHeader(entry, session);
     if (!entry.ws && !entry.retryTimer && session.online) connectTerminal(entry, session);
     updateTilesActive();
@@ -935,7 +1121,18 @@ function ensureTerminal(session) {
     'aria-label': 'Focus this session',
     text: '⤢',
   });
-  const head = h('div', { class: 'tile-head' }, headDot, headName, headModel, focusBtn);
+  const hideBtn = h('button', {
+    class: 'tile-focus tile-hide',
+    type: 'button',
+    title: 'Hide from tiles',
+    'aria-label': 'Hide this session from the tile grid',
+    text: '×',
+    onclick: (event) => {
+      event.stopPropagation();
+      hideSession(session.id);
+    },
+  });
+  const head = h('div', { class: 'tile-head' }, headDot, headName, headModel, focusBtn, hideBtn);
   const termEl = h('div', { class: 'tile-term' });
   const offlineEl = h('div', {
     class: 'tile-offline',
@@ -984,11 +1181,11 @@ function ensureTerminal(session) {
   setupTerminalClipboard(entry);
 
   head.addEventListener('click', (event) => {
-    if (event.target.closest('.tile-focus')) return;
+    if (event.target.closest('button')) return;
     if (state.layout === 'tile') activate(session.id, { quiet: true });
   });
   head.addEventListener('dblclick', (event) => {
-    if (event.target.closest('.tile-focus')) return;
+    if (event.target.closest('button')) return;
     setLayout('single');
     activate(session.id);
   });
@@ -999,7 +1196,7 @@ function ensureTerminal(session) {
   });
   el.addEventListener('mousedown', (event) => {
     if (state.layout !== 'tile') return;
-    if (event.target.closest('.tile-focus')) return;
+    if (event.target.closest('button')) return;
     if (state.activeId !== session.id) activate(session.id, { quiet: true });
   });
 
@@ -1716,12 +1913,20 @@ function bind() {
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
+    if (hiddenMenuEl) { closeHiddenMenu(); return; }
     if (!$('#modal-root').hidden) { closeModal(); return; }
     closeDrawer({ restoreFocus: true });
+  });
+  document.addEventListener('click', (event) => {
+    if (!hiddenMenuEl) return;
+    if (hiddenMenuEl.contains(event.target)) return;
+    if (event.target.closest && event.target.closest('#hidden-menu-btn')) return;
+    closeHiddenMenu();
   });
   $('#new-key').addEventListener('click', createKeyModal);
   $('#empty-new').addEventListener('click', connectModal);
   $('#empty-refresh').addEventListener('click', () => loadSessions());
+  $('#hidden-show-all').addEventListener('click', showAllSessions);
   $('#overlay-reconnect').addEventListener('click', () => {
     const session = activeSession();
     if (session) { const entry = ensureTerminal(session); connectTerminal(entry, session); }
@@ -1777,6 +1982,7 @@ function bind() {
     setTimeout(syncViewportHeight, 250);
   });
   window.addEventListener('resize', () => {
+    closeHiddenMenu();
     syncViewportHeight();
     if (window.matchMedia('(max-width: 520px)').matches && state.layout === 'tile') {
       setLayout('single', { persist: false });

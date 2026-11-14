@@ -6,6 +6,17 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Tile mode can hide individual sessions from the grid.  Hidden sessions are
+  remembered across reloads and can be restored from the topbar
+  `Hidden (n)` menu.
+
+### Changed
+
+- Removed the topbar `Connect session`, `Refresh`, `Copy attach`, and `tmux`
+  buttons from the sessions view.  The `+` tab still connects a session.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added
