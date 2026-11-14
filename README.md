@@ -96,7 +96,7 @@ sdist, and the standalone client script.
 docker run -d --name opencloddie \
   -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 \
   -v opencloddie-data:/data \
-  ghcr.io/dustify-slopwerke/opencloddie:0.5.0
+  ghcr.io/dustify-slopwerke/opencloddie:0.5.1
 
 # Or build the checked-out source
 docker compose up -d --build
@@ -109,7 +109,7 @@ Wheel (server; the client is downloaded from a running server):
 
 ```bash
 python3 -m pip install \
-  https://github.com/dustify-slopwerke/opencloddie/releases/download/v0.5.0/opencloddie-0.5.0-py3-none-any.whl
+  https://github.com/dustify-slopwerke/opencloddie/releases/download/v0.5.1/opencloddie-0.5.1-py3-none-any.whl
 opencloddie-server init
 opencloddie-server run
 ```
@@ -258,7 +258,7 @@ docs/                        architecture, API, client, security, dev, ops
 
 ## Status
 
-v0.5.0.  The server is pure Python standard library; the only runtime
+v0.5.1.  The server is pure Python standard library; the only runtime
 requirements are Python 3.12 (server and client) and tmux/Claude Code on the
 client.  The API is a streaming pass-through — it does not translate message
 formats, so any model OpenCode Go exposes through its Anthropic endpoint works
