@@ -301,6 +301,9 @@ pre {
   background: #07090c; display: flex; flex-direction: column;
   min-width: 0; min-height: 0;
 }
+/* The tiled rule above outranks .term-wrap.hidden, so hidden tiles need an
+   equally specific display:none to actually leave the grid. */
+.terminals.tiled .term-wrap.hidden { display: none; }
 .terminals.tiled .term-wrap.is-active {
   border-color: rgba(126,231,135,.42);
   box-shadow: 0 0 0 1px rgba(126,231,135,.12);
