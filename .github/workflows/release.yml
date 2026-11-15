@@ -97,7 +97,7 @@ jobs:
             SOURCE_URL=https://github.com/${{ github.repository }}
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.vars.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
