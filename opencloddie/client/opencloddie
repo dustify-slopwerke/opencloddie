@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -422,6 +422,24 @@ def find_claude_bin(cfg: dict) -> str:
     return found
 
 
+def claude_config_dir() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude"
+    )
+
+
+def claude_transcript_path(cwd: str, session_id: str) -> str:
+    """Best-effort Claude Code transcript path for a working directory."""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(cwd))
+    return os.path.join(claude_config_dir(), "projects", slug, f"{session_id}.jsonl")
+
+
+def claude_transcript_exists(cwd: str, session_id: str) -> bool:
+    if not cwd or not session_id:
+        return False
+    return os.path.isfile(claude_transcript_path(cwd, session_id))
+
+
 CHAT_MIN_CLAUDE_VERSION = "2.1.300"
 CHAT_DEFAULT_MAX_EVENT_BYTES = 256 * 1024
 CHAT_DEFAULT_MAX_TOOL_RESULT_BYTES = 64 * 1024
@@ -529,6 +547,36 @@ def web_session_url(cfg: dict, me: dict | None, session_id: str) -> str:
         or ""
     ).rstrip("/")
     return f"{base}/#session={session_id}"
+
+
+def signal_pane_child(tmux_name: str, sig: int = signal.SIGTERM) -> int:
+    """Signal the mode supervisor's current child (claude or __chat)."""
+    try:
+        panes = subprocess.run(
+            ["tmux", "list-panes", "-t", tmux_name, "-F", "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if panes.returncode != 0:
+            return 0
+        for token in panes.stdout.split():
+            if not token.isdigit():
+                continue
+            children = subprocess.run(
+                ["pgrep", "-P", token], capture_output=True, text=True, timeout=5
+            )
+            for child in children.stdout.split():
+                if not child.isdigit():
+                    continue
+                try:
+                    os.kill(int(child), sig)
+                    return int(child)
+                except OSError:
+                    continue
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0
 
 
 def respawn_pane(tmux_name: str, cwd: str, session_id: str) -> bool:
@@ -814,6 +862,7 @@ def write_runner(
 
     lines = [
         "#!/usr/bin/env bash",
+        "# opencloddie-runner-v2",
         "set -u",
         f"cd -- {shlex.quote(item['cwd'])}",
     ]
@@ -829,9 +878,11 @@ def write_runner(
         lines.append(f"unset {key}")
     for key, value in env.items():
         lines.append(f"export {key}={shlex.quote(value)}")
+    transcript = claude_transcript_path(item["cwd"], claude_session_id)
     lines += [
         f"MODE_FILE={shlex.quote(paths['mode'])}",
         f"STARTED={shlex.quote(paths['started'])}",
+        f"TRANSCRIPT={shlex.quote(transcript)}",
         "while :; do",
         '  mode="$(cat "$MODE_FILE" 2>/dev/null || true)"',
         '  case "$mode" in',
@@ -839,22 +890,34 @@ def write_runner(
         f"      {shlex.join(chat_cmd)}",
         "      rc=$?",
         "      sleep 0.5",
-        "      if [ \"$rc\" -ne 0 ]; then exit \"$rc\"; fi",
-        "      # A handoff writes tui and the agent respawns this pane; stop here",
-        "      # so the supervisor does not briefly launch the TUI first.",
-        '      [ "$(cat "$MODE_FILE" 2>/dev/null || true)" = chat ] || exit 0',
+        "      # A handoff only rewrites the mode file and stops the child; loop",
+        "      # back and start whichever mode is requested next.",
+        "      continue",
         "      ;;",
         "    *)",
-        '      if [ -f "$STARTED" ]; then first=0; else first=1; : > "$STARTED"; fi',
+        '      : > "$STARTED" 2>/dev/null || true',
         "      while :; do",
-        '        if [ "$first" -eq 1 ]; then',
-        f"          {shlex.join(tui_first)}",
-        "          first=0",
-        "        else",
+        "        # Resume only when this id actually has a transcript; otherwise",
+        "        # start a new one with the preassigned id.",
+        '        if [ -f "$TRANSCRIPT" ]; then',
         f"          {shlex.join(tui_resume)}",
+        "        else",
+        f"          {shlex.join(tui_first)}",
         "        fi",
         "        printf '\\n[claude exited - press Enter to restart, Ctrl-b d to detach]\\n'",
-        "        read -r _ || exit 0",
+        "        # Wait for Enter, but notice a chat handoff within a second so the",
+        "        # pane can switch without being killed/respawned.",
+        "        switched=0",
+        "        while :; do",
+        "          read -r -t 1 _; rc=$?",
+        "          if [ \"$rc\" -eq 0 ]; then break; fi",
+        "          if [ \"$rc\" -eq 1 ]; then exit 0; fi",
+        '          if [ "$(cat "$MODE_FILE" 2>/dev/null || true)" != "tui" ]; then',
+        "            switched=1",
+        "            break",
+        "          fi",
+        "        done",
+        '        [ "$switched" -eq 1 ] && break',
         "      done",
         "      ;;",
         "  esac",
@@ -874,6 +937,17 @@ def write_runner(
     except OSError:
         pass
     return path
+
+
+RUNNER_MARKER = "# opencloddie-runner-v2"
+
+
+def runner_is_current(session_id: str) -> bool:
+    try:
+        with open(runner_path(session_id), "r", encoding="utf-8") as fh:
+            return RUNNER_MARKER in fh.read(4096)
+    except OSError:
+        return False
 
 
 def start_local_session(
@@ -922,6 +996,45 @@ def start_local_session(
     item["fingerprint"] = fingerprint
     save_sessions(sessions)
 
+    if running and not runner_is_current(session_id):
+        # One-time supervisor upgrade.  The mode file and Claude session id
+        # survive, so the pane restarts into the same conversation.
+        print(
+            "opencloddie: upgrading this session's mode supervisor; "
+            "the pane will restart once.",
+            file=sys.stderr,
+        )
+        tmux_kill(item["tmux"])
+        stop_agent(item)
+        # The old runner removes its socket on shutdown.  Let it finish before
+        # starting the replacement, or its cleanup can unlink the new socket.
+        try:
+            subprocess.run(
+                ["pkill", "-TERM", "-f", f"__chat.*{session_id}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        socket_path = chat_paths(session_id)["socket"]
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            try:
+                live = subprocess.run(
+                    ["pgrep", "-f", f"__chat.*{session_id}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=2,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                live = ""
+            if not live and not os.path.exists(socket_path):
+                break
+            time.sleep(0.1)
+        running = False
+
     if not running:
         write_mode(session_id, mode)
         runner = write_runner(item, cfg, me, claude_args, mode=mode)
@@ -936,12 +1049,12 @@ def start_local_session(
                 + (result.stderr.strip() or f"exit {result.returncode}")
             )
     elif previous_mode != mode or not os.path.exists(runner_path(session_id)):
-        # Local mode switch: the supervisor reads the mode file on respawn.
+        # Local mode switch: the supervisor notices the mode file and swaps
+        # the child; do not respawn the pane (the kill signal raced).
         write_mode(session_id, mode)
         if not os.path.exists(runner_path(session_id)):
             write_runner(item, cfg, me, claude_args, mode=mode)
-        if not respawn_pane(item["tmux"], item["cwd"], session_id):
-            raise SystemExit("opencloddie: could not restart the tmux pane for the new mode")
+        signal_pane_child(item["tmux"])
         # Restart the agent so it wires up the new mode immediately.
         stop_agent(item)
     tmux_enable_mouse(item["tmux"])
@@ -2652,6 +2765,38 @@ class Agent:
             self.log(f"cannot rebuild the mode supervisor: {exc}")
             return False
 
+    def _signal_pane_child(self, sig: int = signal.SIGTERM) -> int:
+        """Signal the supervisor's current child (claude or __chat)."""
+        try:
+            panes = subprocess.run(
+                ["tmux", "list-panes", "-t", self.tmux, "-F", "#{pane_pid}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if panes.returncode != 0:
+                return 0
+            for token in panes.stdout.split():
+                if not token.isdigit():
+                    continue
+                children = subprocess.run(
+                    ["pgrep", "-P", token],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                for child in children.stdout.split():
+                    if not child.isdigit():
+                        continue
+                    try:
+                        os.kill(int(child), sig)
+                        return int(child)
+                    except OSError:
+                        continue
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return 0
+
     def _handle_handoff(self, to, force: bool) -> None:
         if to not in ("chat", "tui", "terminal"):
             self._send(
@@ -2688,9 +2833,14 @@ class Agent:
                 }
             )
             if to == "tui":
-                # Ask the runner to finish cleanly, then respawn the pane.
+                # Flip the mode file and stop the chat runner; the supervisor
+                # notices and starts the TUI.  Never respawn the pane: the
+                # kill signal from respawn-pane raced and could take out the
+                # freshly started process (and the session with it).
                 self._chat_send({"t": "handoff", "to": "tui"})
                 self._deny_chat_pending("session switched to terminal mode")
+                write_mode(self.session_id, "tui")
+                self._signal_pane_child()
                 deadline = time.monotonic() + 3.0
                 while (
                     not force
@@ -2699,26 +2849,6 @@ class Agent:
                     and not self.stop_event.is_set()
                 ):
                     time.sleep(0.05)
-                if not self._ensure_runner():
-                    self._send(
-                        {
-                            "t": "chat_error",
-                            "message": "mode supervisor is missing; restart the session",
-                            "retryable": False,
-                        }
-                    )
-                    return
-                write_mode(self.session_id, "tui")
-                if not respawn_pane(self.tmux, self.cwd, self.session_id):
-                    write_mode(self.session_id, "chat")
-                    self._send(
-                        {
-                            "t": "chat_error",
-                            "message": "could not restart the tmux pane",
-                            "retryable": True,
-                        }
-                    )
-                    return
                 self.mode = "tui"
                 self._send({"t": "chat_mode", "mode": "tui", "status": "idle", "message": ""})
             else:
@@ -2732,16 +2862,9 @@ class Agent:
                     )
                     return
                 write_mode(self.session_id, "chat")
-                if not respawn_pane(self.tmux, self.cwd, self.session_id):
-                    write_mode(self.session_id, "tui")
-                    self._send(
-                        {
-                            "t": "chat_error",
-                            "message": "could not restart the tmux pane",
-                            "retryable": True,
-                        }
-                    )
-                    return
+                # Stop the TUI child; the supervisor's prompt loop sees the
+                # mode change and starts __chat without losing the tmux pane.
+                self._signal_pane_child()
                 self.mode = "chat"
                 self._send(
                     {"t": "chat_mode", "mode": "chat", "status": "starting", "message": ""}
@@ -4040,8 +4163,14 @@ class ChatRunner:
                 self.stop_reason = "permission-server-missing"
                 self.stop_event.set()
                 return False
+            cwd = str(self.launch.get("cwd") or os.getcwd())
             marker = self.paths["started"]
-            resume = bool(self.launch.get("resume")) or os.path.exists(marker)
+            # Never --resume an id with no transcript: Claude Code exits with
+            # "No conversation found" and the runner would give up.  An id can
+            # be stale after a restart, or a TUI may not have written a turn yet.
+            resume = (
+                bool(self.launch.get("resume")) or os.path.exists(marker)
+            ) and claude_transcript_exists(cwd, self.claude_session_id)
             if not resume:
                 try:
                     write_text_atomic(marker, "1\n", 0o600)
@@ -4083,7 +4212,7 @@ class ChatRunner:
             try:
                 proc = subprocess.Popen(
                     argv,
-                    cwd=str(self.launch.get("cwd") or os.getcwd()),
+                    cwd=cwd,
                     env=self._child_env(),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -4129,6 +4258,11 @@ class ChatRunner:
                 name="chat-watch",
                 daemon=True,
             ).start()
+            # Claude Code may not emit system/init until the first turn.  Once
+            # the child is spawned and stdin is writable the session is ready,
+            # so don't leave the UI stuck on "Starting…"/busy.
+            if not self.turn_active:
+                self._set_status("idle", force=True)
             self._log(f"started claude pid {proc.pid}")
             queued = []
             while self.queued_inputs:
@@ -4689,7 +4823,16 @@ class ChatRunner:
 
     def _on_system_init(self, obj: dict) -> None:
         session_id = str(obj.get("session_id") or "")
-        if session_id:
+        if session_id and session_id != self.claude_session_id:
+            # The CLI may choose a different id when starting fresh; keep the
+            # launch file and the hub in sync so handoffs resume the real one.
+            self.claude_session_id = session_id
+            self.launch["claude_session_id"] = session_id
+            try:
+                write_json(self.paths["launch"], self.launch, mode=0o600)
+            except OSError:
+                pass
+        elif session_id:
             self.claude_session_id = session_id
         model = str(obj.get("model") or self.model)
         if model:

@@ -4,6 +4,28 @@ All notable changes to opencloddie are documented here.  The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-25
+
+### Fixed
+
+- Chat sessions no longer sit on "Starting…"/"Claude is working…" before the
+  first turn; the runner marks itself ready once the child is spawned.
+- Chat ↔ terminal handoff no longer calls `tmux respawn-pane -k`, whose kill
+  signal raced and could tear down the freshly started runner.  The mode
+  supervisor now swaps the child in place (the TUI prompt loop notices the mode
+  file within a second, and chat→TUI stops the runner).
+- Pre-0.6.1 sessions are migrated automatically on `opencloddie run`; the
+  migration waits for the old runner to release its socket before starting the
+  replacement.
+- The chat runner only uses `--resume` when the session transcript actually
+  exists; otherwise it starts with the preassigned id.  It also records the id
+  the CLI reports if it differs, so handoff no longer retries a nonexistent
+  conversation.
+- Web chat: duplicate "No messages yet" empty states are removed before each
+  snapshot; tab clicks activate on pointerdown and the tab strip is not rebuilt
+  when nothing changed; tool cards left in the orange "running" state at the end
+  of a turn are marked done.
+
 ## [0.6.0] - 2026-11-25
 
 ### Added

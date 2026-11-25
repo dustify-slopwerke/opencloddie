@@ -45,6 +45,7 @@
     bound: false,
     lastErrorToast: 0,
     toolSeq: 0,
+    runningTools: new Set(),
     attachments: [],
     attachSeq: 0,
     dragDepth: 0,
@@ -306,6 +307,7 @@
     state.groups.clear();
     state.streams.clear();
     state.toolCards.clear();
+    state.runningTools.clear();
     state.nestedContainers.clear();
     state.applied.clear();
     state.appliedIds.clear();
@@ -372,6 +374,7 @@
 
   function finalizeSnapshot() {
     removeLoading();
+    removeEmpty();
     const tl = timeline();
     if (!tl) return;
     if (!tl.querySelector('.chat-msg, .chat-permission, .chat-row, .chat-tool')) {
@@ -721,13 +724,23 @@
     const id = String(payload.tool_use_id || payload.id || '');
     const card = id ? state.toolCards.get(id) : null;
     state.streaming = false;
+    if (id) state.runningTools.delete(id);
     if (card) card.setResult(payload);
     else appendTimeline(window.ChatRender.orphanToolResult(payload));
     scheduleComposerSync();
   }
 
+  function finishRunningTools() {
+    for (const id of Array.from(state.runningTools)) {
+      const card = state.toolCards.get(id);
+      if (card && typeof card.setStatus === 'function') card.setStatus('done', 'ok');
+      state.runningTools.delete(id);
+    }
+  }
+
   function handleResult(payload) {
     state.streaming = false;
+    finishRunningTools();
     state.chat = Object.assign({}, state.chat || {}, { status: 'idle' });
     const cost = Number(payload.total_cost_usd);
     if (Number.isFinite(cost)) state.chat.cost_usd = cost;
@@ -748,6 +761,7 @@
     const input = block.input && typeof block.input === 'object' ? block.input : {};
     const card = window.ChatRender.toolCard(name, input, id);
     state.toolCards.set(id, card);
+    state.runningTools.add(id);
     if (/^(Agent|Task)$/i.test(name)) {
       const existing = state.nestedContainers.get(id);
       if (existing && existing !== card.nested) {
@@ -1249,14 +1263,14 @@
 
   function removeLoading() {
     const tl = timeline();
-    const row = tl && tl.querySelector('.chat-loading');
-    if (row) row.remove();
+    if (!tl) return;
+    for (const row of tl.querySelectorAll('.chat-loading')) row.remove();
   }
 
   function removeEmpty() {
     const tl = timeline();
-    const empty = tl && tl.querySelector('.chat-empty');
-    if (empty) empty.remove();
+    if (!tl) return;
+    for (const empty of tl.querySelectorAll('.chat-empty')) empty.remove();
   }
 
   /* ------------------------------------------------------- read + notify */

@@ -1171,8 +1171,27 @@ function updateSubtitle() {
   if (state.view === 'keys') $('#view-subtitle').textContent = VIEWS.keys.subtitle();
 }
 
+let tabSignature = null;
+
 function renderTabs() {
   const root = $('#tabs');
+  const signature = JSON.stringify(state.sessions.map((session) => [
+    session.id,
+    session.name,
+    session.online,
+    session.hostname,
+    session.cwd,
+    session.model,
+    session.chat ? session.chat.mode : null,
+    session.chat ? session.chat.pending : null,
+    session.chat ? session.chat.unread : null,
+    session.unread,
+    session.id === state.activeId,
+  ]));
+  // Rebuilding an unchanged strip between mousedown and mouseup loses the
+  // click; only rebuild when something that is rendered actually changed.
+  if (signature === tabSignature) return;
+  tabSignature = signature;
   clear(root);
   if (!state.sessions.length) {
     root.append(h('span', { class: 'tab-empty', text: 'No sessions connected' }));
@@ -1186,7 +1205,15 @@ function renderTabs() {
       class: `tab ${session.id === state.activeId ? 'is-active' : ''}`.trim(),
       role: 'tab',
       title: `${session.name}\n${session.hostname || 'unknown host'} · ${session.cwd || '—'}\n${session.model || ''}`,
-      onclick: () => activate(session.id),
+      dataset: { sessionId: session.id },
+      // Activate on pointerdown so a re-render cannot eat the click; keep a
+      // keyboard-only click path (detail === 0) for accessibility.
+      onpointerdown: (event) => {
+        if (event.button === 0) activate(session.id);
+      },
+      onclick: (event) => {
+        if (event.detail === 0) activate(session.id);
+      },
     },
       h('span', { class: `dot ${session.online ? 'online' : ''}`.trim() }),
       h('span', { class: 'tab-name', text: session.name }),
