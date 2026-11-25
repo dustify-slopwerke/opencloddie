@@ -153,6 +153,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     log.info("closed %d stale agent connection(s)", closed)
                 app.metrics_tick()
                 app.messages_purge_tick()
+                app.chat.purge_tick()
             except Exception:  # noqa: BLE001
                 log.exception("watchdog error")
 

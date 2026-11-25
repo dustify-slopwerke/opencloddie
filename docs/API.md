@@ -16,7 +16,7 @@ not safe to expose: it trusts the identity header.
 ### `GET /healthz`
 
 ```json
-{"ok": true, "version": "0.5.1", "mode": "api", "uptime": 42}
+{"ok": true, "version": "0.6.0", "mode": "api", "uptime": 42}
 ```
 
 No auth.
@@ -114,6 +114,9 @@ The client's bootstrap endpoint.
   "models": [{"id": "...", "label": "...", "context_tokens": 1000000, "note": "..."}],
   "opencode_key_set": true,
   "messages_enabled": true,
+  "features": {"chat": true},
+  "chat": {"max_event_bytes": 262144, "max_tool_result_bytes": 65536,
+           "permission_timeout_seconds": 300, "min_claude_version": "2.1.300"},
   "gateway_base_url": "https://cloddie.example.com",
   "web_url": "https://cloddie.example.com",
   "install": {"command": "curl -fsSL .../install/opencloddie ..."}
@@ -205,7 +208,7 @@ Used by `opencloddie __agent`.  Auth via the same API key (header or query).
 Handshake, then a JSON hello:
 
 ```json
-{"t":"hello","agent_id":"a-...","version":"0.5.1","hostname":"laptop",
+{"t":"hello","agent_id":"a-...","version":"0.6.0","hostname":"laptop",
  "platform":"linux","session":{"id":"s_...","name":"work","cwd":"/home/alice/src/api"}}
 ```
 
@@ -235,6 +238,18 @@ Then the framed protocol (text JSON frames; `data` is base64):
 A connection registered for one session id cannot steal another user's id
 (409/`handshake failed`).  The hub is in-memory; a reconnecting agent replaces
 the old connection and re-marks the session online.
+
+### Structured chat frames
+
+A chat-capable agent adds `{"chat":true,"chat_version":1}` to
+`hello.features` and `{"mode":"chat","claude_session_id":"<uuid>"}` to
+`hello.session`.  The hub whitelists `mouse`, `chat` and `chat_version` only.
+The relay frames (`chat_hello`, `chat_event`, `chat_delta`, `chat_state`,
+`chat_permission_request`, `chat_permission_resolved`, `chat_mode`,
+`chat_exit`, `chat_error` upstream; `chat_input`, `chat_permission_result`,
+`chat_interrupt`, `chat_handoff`, `chat_config`, `chat_resync`, `chat_ack`
+downstream) are specified in
+[`CHAT-PROTOCOL.md`](CHAT-PROTOCOL.md#agent--hub-frames).
 
 ## Web terminal WebSocket (web listener)
 
@@ -277,7 +292,7 @@ require `X-OpenCloddie-Client: web`, a same-origin `Origin` (when present), and
 {"ok":true,
  "user":{"username":"alice","name":"Alice","email":"a@example.com","groups":["god"],"default_model":"deepseek-v4.1-flash"},
  "opencode_key_set":true,"opencode_key_hint":"***********1234",
- "messages_enabled":true,
+ "messages_enabled":true,"features":{"chat":true},
  "models":[...],"default_model":"deepseek-v4.1-flash",
  "urls":{"web":"https://cloddie.example.com","api":"https://cloddie.example.com"},
  "install":{"command":"...","login":"..."}}
@@ -302,7 +317,7 @@ returns the requested (or nearest allowed) range and its resolution in
 {"ok":true,"generated_at":"...","scope":"admin|self",
  "window_seconds":3600,"step_seconds":60,
  "live":{
-   "process":{"version":"0.5.1","uptime_seconds":9200,"pid":123,"python":"3.12.8",
+   "process":{"version":"0.6.0","uptime_seconds":9200,"pid":123,"python":"3.12.8",
               "platform":"linux","threads":24,"open_fds":34,
               "memory":{"rss_bytes":52428800,"vms_bytes":0,"peak_rss_bytes":0},
               "cpu":{"user_seconds":1.2,"system_seconds":0.4},
@@ -465,14 +480,40 @@ usual web CSRF header.  Returns 201 with `{"ok":true,"message":...,"unread":n}`.
 Body `{"ids":[1,2]}`.  Marks messages addressed to that session read; the web
 view never acks implicitly.
 
+### Structured chat endpoints
+
+Owner-only, like the terminal/mailbox routes; mutations require
+`X-OpenCloddie-Client: web`.  The full event shapes are in
+[`CHAT-PROTOCOL.md`](CHAT-PROTOCOL.md#browser--hub).
+
+| Method + path | Body / query | Meaning |
+| --- | --- | --- |
+| `GET /api/sessions/<id>/chat` | `limit=200&after_seq=N` | `{chat, events, pending, last_seq, has_more}` |
+| `POST /api/sessions/<id>/chat/input` | `{content, client_msg_id}` | send a user message; `content` may be text or Anthropic content blocks (text + base64 images) |
+| `POST /api/sessions/<id>/chat/interrupt` | `{}` | stop the current turn (kill+resume) |
+| `POST /api/sessions/<id>/chat/mode` | `{mode:"chat"\|"tui", force}` | hand off between chat and the TUI |
+| `POST /api/sessions/<id>/chat/read` | `{last_seq}` | set the unread cursor |
+| `POST /api/sessions/<id>/chat/config` | `{permission_mode, model?, force}` | restart+resume with a new permission mode (the gateway forces the model) |
+| `POST /api/sessions/<id>/chat/rewind` | `{checkpoint_uuid, force?}` | restore files to a checkpoint (conversation is not rewound) |
+| `GET /api/sessions/<id>/chat/search` | `q=...&limit=50` | owner-scoped search over stored payload text |
+| `POST /api/sessions/<id>/chat/permissions/<pid>` | `{behavior, updated_input?, updated_permissions?, message?}` | idempotent approval decision |
+| `DELETE /api/sessions/<id>/chat/history` | — | delete opencloddie chat history (not Claude's transcript) |
+| `WS /api/sessions/<id>/chat/ws` | `after_seq=N` | replay then live events; commands as JSON text frames |
+
+`GET /api/sessions` and `GET /api/sessions/<id>` include a `chat` summary:
+`{mode, status, pending, unread, last_seq}`.  `/client/me` advertises
+`features.chat`.  Chat state is stored in the new `chat_*` tables (schema v4);
+interrupts restart the headless process with `--resume` because SIGINT ends it.
+
 ### `GET /healthz`
 
-`{"ok":true,"version":"0.5.1","mode":"web"}` (no auth).
+`{"ok":true,"version":"0.6.0","mode":"web"}` (no auth).
 
 ## Static assets
 
-`/`, `/index.html`, `/app.js`, `/stats.js`, `/style.css`, `/favicon.svg`,
-`/vendor/*`.  Vendored xterm.js; no external CDN at runtime.  CSP is
+`/`, `/index.html`, `/app.js`, `/stats.js`, `/chat.js`, `/chat-render.js`,
+`/style.css`, `/chat.css`, `/favicon.svg`, `/vendor/*`.  Vendored xterm.js,
+marked, DOMPurify; no external CDN at runtime.  CSP is
 `default-src 'self'` with `connect-src` permitting same-origin WebSockets.
 
 ## Rate limiting
@@ -500,7 +541,7 @@ is same-origin only.  This also underpins CSRF defence for the web listener.
 
 ## Versioning
 
-`v0.5.1`.  The public API mirrors the Anthropic Messages API and tracks the
+`v0.6.0`.  The public API mirrors the Anthropic Messages API and tracks the
 upstream's behavior; additive response headers and fields are expected.  The
 agent/terminal WebSocket protocols are internal and may change between minor
 versions; client and server should be upgraded together.

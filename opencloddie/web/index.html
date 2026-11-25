@@ -8,6 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/xterm.css">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/chat.css">
 </head>
 <body>
   <div id="booting" class="booting">
@@ -143,6 +144,20 @@
             </div>
           </div>
         </div>
+        <section class="chat-pane" id="chat-pane" hidden aria-label="Chat session">
+          <div class="chat-status" id="chat-status"></div>
+          <div class="chat-timeline" id="chat-timeline" role="log" aria-live="polite" aria-relevant="additions"></div>
+          <div class="chat-composer" id="chat-composer">
+            <div class="chat-composer-box">
+              <textarea id="chat-input" class="chat-input" rows="1" placeholder="Message Claude…" autocomplete="off" spellcheck="false" aria-label="Message Claude"></textarea>
+              <div class="chat-composer-bar">
+                <span class="chat-composer-hint" id="chat-composer-hint"></span>
+                <button class="btn btn-danger btn-sm chat-stop" id="chat-stop" type="button" hidden>Stop</button>
+                <button class="btn btn-primary btn-sm chat-send" id="chat-send" type="button" disabled>Send</button>
+              </div>
+            </div>
+          </div>
+        </section>
         <footer class="statusbar">
           <span class="statusbar-item" id="status-active">No session selected</span>
           <span class="statusbar-spacer"></span>
@@ -341,7 +356,11 @@
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
   <script src="/vendor/addon-webgl.js"></script>
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/purify.min.js"></script>
   <script src="/stats.js"></script>
+  <script src="/chat-render.js"></script>
+  <script src="/chat.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

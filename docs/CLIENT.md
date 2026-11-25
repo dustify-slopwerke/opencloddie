@@ -66,6 +66,8 @@ Start or re-attach a session.
 -C, --cwd DIR       working directory (default: cwd)
     --new           create a new session even if name+cwd match an existing one
     --no-attach     start tmux + agent and return
+    --chat          start in structured chat mode (web UI; no local TUI)
+    --mode MODE     tui (default) or chat
     -- [claude args] passed to claude on every restart
 ```
 
@@ -104,6 +106,53 @@ Behaviour:
 `Ctrl-b d` detaches.  The tmux session and agent remain; `opencloddie attach`
 returns.  Closing the terminal window without detaching also leaves tmux
 running (the client process exits, tmux does not).
+
+### Structured chat mode
+
+`opencloddie run --chat` (or `--mode chat`) starts the session in chat mode
+instead of the local Claude TUI.  Claude runs headless inside the same tmux
+session (stream-json), and the web UI renders messages, tool calls, diffs,
+approvals and plan-mode/AskUserQuestion cards natively.  The command prints
+`<web>/#session=<id>` instead of attaching, because there is no local TUI to
+attach to; the web UI opens that session in single layout.
+
+Requirements:
+
+- Claude Code **2.1.300 or newer** on the host.
+- The opencloddie server must advertise `features.chat` (0.6+).
+- The generated MCP configs (mailbox + permission prompt) are merged with any
+  `--mcp-config` you pass; chat refuses to start without the permission tool
+  rather than bypass approvals.
+
+The tmux session runs a mode supervisor.  The web UI's **Terminal / Chat**
+toggle hands the same conversation between the Claude TUI and the structured
+runner:
+
+- **Chat → Terminal** stops the headless process and resumes the TUI with
+  `claude --resume <uuid>` in the same tmux pane.  An in-flight turn is
+  interrupted; pending approvals are denied.  The web shows a boundary marker;
+  chat history before the switch is not imported into the web transcript, but
+  Claude retains the conversation context.
+- **Terminal → Chat** stops the TUI and starts the headless runner with the
+  same session id.  The same boundary applies.
+
+Sessions created before 0.6 have no mode supervisor or preassigned Claude
+session id.  Restart them once with the current client:
+`opencloddie stop NAME && opencloddie run --name NAME --chat`.
+
+Interrupting a turn is implemented as SIGINT + `--resume` because SIGINT ends
+the headless Claude process (validated against 2.1.332).  The interrupted turn
+is marked aborted in the transcript.  Changing the permission mode from the web
+header also restarts the runner with `--resume` (it is refused while a turn is
+running); the model itself is always forced by the gateway, so the UI shows the
+effective key model rather than offering a fake model switch.
+
+The composer accepts pasted/dropped images (PNG/JPEG/GIF/WebP, size and count
+caps in the `chat` config); they are sent to Claude as Anthropic image content
+blocks.  Chat history can be searched from the header.  Each user turn records
+a file checkpoint from the replayed message UUID; "Restore files to here" runs
+`claude --resume <uuid> --rewind-files <checkpoint>` after pausing the runner,
+then resumes the chat.  It restores files, not the conversation.
 
 ### `opencloddie attach [NAME]`
 

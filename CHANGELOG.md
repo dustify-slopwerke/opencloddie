@@ -4,7 +4,47 @@ All notable changes to opencloddie are documented here.  The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-11-25
+
+### Added
+
+- Structured chat sessions (experimental): `opencloddie run --chat` runs Claude
+  Code in its documented headless `stream-json` mode and ships normalized
+  events instead of terminal bytes.  The web UI renders streaming Markdown,
+  tool calls and diffs, inline approvals and `AskUserQuestion`, plan mode,
+  subagents and todos.  Requires Claude Code 2.1.300+.
+- Chat/terminal handoff for the same Claude conversation
+  (`claude --resume <session-id>`) through the tmux mode supervisor.
+- Chat persistence in SQLite schema v4 (`chat_state`, `chat_events`,
+  `chat_permissions`, `chat_inputs`, `chat_reads`, `chat_checkpoints`), with
+  owner-only access, retention, history deletion and configurable limits.
+- A separate `opencloddie_permissions` MCP server and `approval_prompt` tool;
+  chat mode refuses to start if approvals cannot be routed (it never bypasses
+  them silently).
+- `/api/sessions/<id>/chat` REST and WebSocket endpoints; the session list
+  gains a `chat` summary (`mode`, `status`, `pending`, `unread`, `last_seq`).
+- Image input: the composer accepts pasted/dropped PNG/JPEG/GIF/WebP images
+  (size/count caps); inline images render from `data:` URLs and oversized ones
+  become placeholders.  Anthropic content-block images pass through to Claude.
+- Conversation search (`GET /api/sessions/<id>/chat/search`) and a header search
+  panel; owner-scoped, plain `LIKE` over stored payloads.
+- File checkpoint rewind: user turns expose "Restore files to here", which
+  pauses the runner, runs `claude -p --resume <id> --rewind-files <uuid>`, and
+  resumes.  Files are restored; the conversation is not rewound.
+- Permission-mode picker in the chat header (restart+resume; refused while
+  busy), and an end-to-end approval test through the real permission MCP shim.
+- Chat status rows for API retries, rate limits, auto-compaction boundaries and
+  prompt suggestions (the runner forwards the CLI events).
+- `#session=<id>` deep links from `opencloddie run --chat`.
+- Protocol notes and Phase 0 validation in `docs/CHAT-PROTOCOL.md`.
+
+### Changed
+
+- The generated client runner is now a mode supervisor driven by
+  `state_dir/mode-<session>`; `tmux respawn-pane -k` switches between the TUI
+  and the chat runner without losing the tmux session or agent connection.
+- Multiple `--mcp-config` flags are now merged; a user-supplied config no
+  longer suppresses opencloddie's mailbox server.
 
 ## [0.5.1] - 2026-11-14
 

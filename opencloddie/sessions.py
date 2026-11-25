@@ -84,7 +84,7 @@ class AgentConnection:
     hostname: str = ""
     last_seen: float = field(default_factory=time.time)
     connected_at: float = field(default_factory=time.time)
-    features: dict[str, bool] = field(default_factory=dict)
+    features: dict[str, Any] = field(default_factory=dict)
     channels: dict[int, Channel] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     alive: bool = True
@@ -137,6 +137,10 @@ class AgentConnection:
             self.send_json({"t": "pong", "ts": message.get("ts")})
             if self.session_id:
                 self.hub.app.db.touch_session(self.session_id)
+            return
+        if isinstance(kind, str) and kind.startswith("chat_"):
+            if self.session_id:
+                self.hub.app.chat.on_agent_frame(self, message)
             return
         if kind == "out":
             channel = self.channels.get(_as_int(message.get("ch")))
@@ -276,7 +280,11 @@ class AgentHub:
         features = hello.get("features")
         if isinstance(features, dict):
             # Only advertise capabilities this server knows how to use.
-            conn.features = {"mouse": bool(features.get("mouse"))}
+            conn.features = {
+                "mouse": bool(features.get("mouse")),
+                "chat": bool(features.get("chat")),
+                "chat_version": int(features.get("chat_version") or 0),
+            }
 
         try:
             self.app.db.upsert_session(
@@ -292,6 +300,18 @@ class AgentHub:
             )
         except PermissionError as exc:
             raise ValueError("session id is already registered by another user") from exc
+
+        if conn.features.get("chat") and self.app.db.get_session(session_id):
+            try:
+                mode = "chat" if _clean_text(session.get("mode"), 16) == "chat" else "tui"
+                self.app.db.chat_state_upsert(
+                    session_id,
+                    mode=mode,
+                    claude_session_id=_clean_text(session.get("claude_session_id"), 64),
+                    status="starting" if mode == "chat" else "idle",
+                )
+            except Exception:  # noqa: BLE001 - chat state is best-effort at hello
+                log.exception("chat state seed failed (session=%s)", session_id)
 
         with self.lock:
             previous = self.by_session.get(session_id)
@@ -316,6 +336,10 @@ class AgentHub:
                 self.agents_disconnected_total += 1
         if conn.session_id:
             self.app.db.mark_agent_offline(conn.agent_id)
+            try:
+                self.app.chat.agent_detached(conn.session_id)
+            except Exception:  # noqa: BLE001 - detach must never raise
+                log.exception("chat detach failed (session=%s)", conn.session_id)
 
     def get_for_session(self, session_id: str) -> AgentConnection | None:
         with self.lock:

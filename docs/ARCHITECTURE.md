@@ -69,6 +69,27 @@ instance_minutes(bucket, sessions_online, sessions_total, agents, viewers,
 
 messages(id, user_id, from_session_id, from_name, to_session_id, to_name,
          body, reply_to, created_at, read_at)
+
+chat_state(session_id PK FK, mode, status, run_id, claude_session_id, model,
+           permission_mode, turn_id, last_seq, last_event_at, cost_usd,
+           tokens_in, tokens_out, context_tokens, pending_count,
+           capabilities JSON, updated_at)
+
+chat_events(seq PK AUTOINCREMENT, session_id FK, event_id, turn_id, kind,
+            payload JSON, created_at, UNIQUE(session_id, event_id))
+
+chat_permissions(id PK, session_id FK, turn_id, request_id, tool_name,
+                 tool_input JSON, suggestions JSON, status, decision,
+                 resolved_by, created_at, resolved_at, delivered_at, expires_at)
+
+chat_inputs(session_id FK, client_msg_id, seq, created_at,
+            PRIMARY KEY(session_id, client_msg_id))
+
+chat_reads(user_id FK, session_id FK, last_seq, updated_at,
+           PRIMARY KEY(user_id, session_id))
+
+chat_checkpoints(session_id FK, checkpoint_uuid, event_seq, created_at,
+                 PRIMARY KEY(session_id, checkpoint_uuid))
 ```
 
 - Users are created on first web request from `Remote-User`; there is no
@@ -198,6 +219,56 @@ server just deletes the row.
   `{"t":"resize","cols":..,"rows":..}` or `{"t":"ping"}`.
 - The handler owns a `Channel`; a pump thread forwards the channel queue to the
   browser and a reader loop forwards browser input to the agent.
+
+## Structured chat sessions
+
+Terminal sessions ship raw PTY bytes.  Chat sessions instead run Claude Code in
+headless `stream-json` mode and ship normalized events.  The full wire contract
+(commands, events, permissions, handoff) is in
+[`CHAT-PROTOCOL.md`](CHAT-PROTOCOL.md).
+
+```
+browser ── WS /api/sessions/<id>/chat/ws ── hub (opencloddie/chat.py)
+                                               │ SQLite chat_* tables
+                                               │ per-session viewer queues
+                                    WS /agent/ws (existing)
+                                               │
+client: __agent ◄── unix socket ──► __chat (inside tmux)
+                                          │ stdin/stdout JSONL
+                                          ▼
+                                     claude -p stream-json
+                                          └── permission MCP server
+```
+
+- The generated runner is a **mode supervisor**.  `state_dir()/mode-<sid>` says
+  `chat` or `tui`; `tmux respawn-pane -k` switches modes without losing the tmux
+  session or the agent connection.
+- `__chat` owns the Claude child: it reads stdout JSONL, normalizes durable
+  events into a local ring, forwards them over the socket, writes user input to
+  stdin, and services the permission-prompt MCP tool.
+- `__agent` remains the only hub client.  It relays `chat_*` frames over the
+  existing WebSocket and forwards hub commands to the socket.
+- The hub assigns the durable `seq`, dedupes by `event_id`, stores normalized
+  events (never raw deltas), broadcasts to every viewer, and owns permission
+  timeouts and state.  A viewer reconnecting with `after_seq` gets the gap.
+- Approvals are owner-only and fail closed.  If the permission tool cannot be
+  loaded, chat mode refuses to start; it never silently bypasses permissions.
+- Interrupt is kill + `--resume` because SIGINT ends the headless process
+  (validated in Phase 0).  The interrupted turn is marked aborted.
+- Chat history is plaintext in the same SQLite database.  This is a deliberate
+  new privacy surface; `chat.retention_days` and the delete-history action are
+  the controls.  Claude's own transcript on the client host is separate.
+- The `chat` config block controls enablement (`enabled`), persistence
+  (`persist`; false = live streaming only), retention, per-session event cap,
+  event/tool-result/input byte caps, image limits (`max_image_bytes`,
+  `max_input_images`, `max_inline_event_image_bytes`), the approval timeout,
+  automatic runner restart, and the minimum Claude Code version.
+  `chat.enabled=false` removes the endpoints and the UI.
+- File checkpoints are recorded from the replayed user-message UUIDs and stored
+  in `chat_checkpoints`.  Rewinding pauses the runner, runs
+  `claude -p --resume <id> --rewind-files <uuid>`, and resumes; it restores
+  files, not the conversation.  Search is an owner-scoped `LIKE` over stored
+  event payloads.
 
 ## Session messaging
 

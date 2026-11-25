@@ -36,7 +36,17 @@ The most security-sensitive areas are:
 - trusting the nginx/Authelia identity header (`auth.py`, `httpd.py`)
 - CSRF and WebSocket origin checks
 - agent/terminal isolation and session ownership (`sessions.py`)
+- chat event storage, permission decisions and the local chat socket (`chat.py`)
 - path handling and static file serving
+
+Structured chat is a deliberate new data-at-rest surface: conversation events,
+tool inputs/outputs and approval decisions are stored in the same plaintext
+SQLite database (unlike terminal output, which is never persisted).  Access is
+owner-only; `chat.retention_days`, `chat.persist`-style caps and the
+delete-history action are the controls.  The permission prompt fails closed: if
+the approval MCP tool cannot be loaded, chat mode refuses to start rather than
+bypassing approvals.  The `__chat` Unix socket and token are mode 0600 and
+local-only.
 
 The project's threat model and hardening checklist are in
 [docs/SECURITY.md](docs/SECURITY.md).  Deployment guidance is in

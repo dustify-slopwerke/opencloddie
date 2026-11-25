@@ -11,7 +11,7 @@ from typing import Any
 from .crypto import hash_api_key, key_prefix, new_api_key
 from .util import iso, new_short_id, safe_username, utcnow
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -110,6 +110,77 @@ CREATE TABLE IF NOT EXISTS instance_minutes (
     cpu_seconds REAL,
     threads INTEGER,
     db_bytes INTEGER
+);
+CREATE TABLE IF NOT EXISTS chat_state (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'tui',
+    status TEXT NOT NULL DEFAULT 'offline',
+    run_id TEXT NOT NULL DEFAULT '',
+    claude_session_id TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    permission_mode TEXT NOT NULL DEFAULT 'default',
+    turn_id TEXT NOT NULL DEFAULT '',
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    last_event_at TEXT,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    context_tokens INTEGER,
+    pending_count INTEGER NOT NULL DEFAULT 0,
+    capabilities TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_state_claude ON chat_state(claude_session_id);
+CREATE TABLE IF NOT EXISTS chat_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_events_session ON chat_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_chat_events_turn ON chat_events(session_id, turn_id, seq);
+CREATE TABLE IF NOT EXISTS chat_permissions (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    tool_input TEXT NOT NULL DEFAULT '{}',
+    suggestions TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    decision TEXT NOT NULL DEFAULT '',
+    resolved_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    delivered_at TEXT,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chat_permissions_pending
+    ON chat_permissions(session_id, status);
+CREATE TABLE IF NOT EXISTS chat_inputs (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_msg_id TEXT NOT NULL,
+    seq INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, client_msg_id)
+);
+CREATE TABLE IF NOT EXISTS chat_reads (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, session_id)
+);
+CREATE TABLE IF NOT EXISTS chat_checkpoints (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    checkpoint_uuid TEXT NOT NULL,
+    event_seq INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, checkpoint_uuid)
 );
 """
 
@@ -602,6 +673,399 @@ class Database:
         with self.lock, self.conn:
             cur = self.conn.execute(
                 "DELETE FROM messages WHERE created_at < ?", (cutoff,)
+            )
+        return cur.rowcount
+
+    # ---------------------------------------------------------------- chat
+    CHAT_STATE_DEFAULTS: dict[str, Any] = {
+        "mode": "tui",
+        "status": "offline",
+        "run_id": "",
+        "claude_session_id": "",
+        "model": "",
+        "permission_mode": "default",
+        "turn_id": "",
+        "last_seq": 0,
+        "last_event_at": None,
+        "cost_usd": 0.0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "context_tokens": None,
+        "pending_count": 0,
+        "capabilities": "{}",
+    }
+
+    def chat_state_get(self, session_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM chat_state WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return _row(row)
+
+    def chat_state_upsert(self, session_id: str, **fields: Any) -> dict[str, Any]:
+        existing = self.chat_state_get(session_id) or {}
+        data: dict[str, Any] = {}
+        for key, default in self.CHAT_STATE_DEFAULTS.items():
+            value = fields.get(key, existing.get(key, default))
+            if key == "capabilities" and not isinstance(value, str):
+                value = json.dumps(value or {}, separators=(",", ":"))
+            data[key] = value
+        data["updated_at"] = iso()
+        columns = list(data)
+        values = [data[column] for column in columns]
+        placeholders = ",".join("?" for _ in columns)
+        updates = ",".join(f"{column}=excluded.{column}" for column in columns)
+        with self.lock, self.conn:
+            self.conn.execute(
+                f"INSERT INTO chat_state(session_id,{','.join(columns)}) "
+                f"VALUES(?,{placeholders}) "
+                f"ON CONFLICT(session_id) DO UPDATE SET {updates}",
+                [session_id, *values],
+            )
+        return self.chat_state_get(session_id) or data
+
+    def chat_state_set_pending_count(self, session_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE chat_state SET pending_count=("
+                "SELECT COUNT(*) FROM chat_permissions "
+                "WHERE session_id=? AND status='pending'), updated_at=? "
+                "WHERE session_id=?",
+                (session_id, iso(), session_id),
+            )
+
+    def append_chat_event(
+        self,
+        session_id: str,
+        user_id: int,
+        event_id: str,
+        kind: str,
+        payload: Any,
+        *,
+        turn_id: str = "",
+    ) -> tuple[int, bool]:
+        """Insert an event, returning (seq, inserted).  event_id is the dedupe key."""
+        now = iso()
+        if not isinstance(payload, str):
+            payload = json.dumps(payload, separators=(",", ":"))
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO chat_events"
+                "(session_id,event_id,turn_id,kind,payload,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (session_id, event_id, turn_id, kind, payload, now),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT seq FROM chat_events WHERE session_id=? AND event_id=?",
+                    (session_id, event_id),
+                ).fetchone()
+                return (int(row[0]) if row else 0), False
+            seq = int(cur.lastrowid)
+            self.conn.execute(
+                "UPDATE chat_state SET last_seq=?, last_event_at=?, updated_at=? "
+                "WHERE session_id=?",
+                (seq, now, now, session_id),
+            )
+        return seq, True
+
+    def chat_events_after(
+        self, session_id: str, after_seq: int = 0, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_events WHERE session_id=? AND seq>? "
+                "ORDER BY seq ASC LIMIT ?",
+                (session_id, int(after_seq), min(2000, max(1, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def chat_events_before(
+        self, session_id: str, before_seq: int, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_events WHERE session_id=? AND seq<? "
+                "ORDER BY seq DESC LIMIT ?",
+                (session_id, int(before_seq), min(2000, max(1, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def latest_chat_events(
+        self, session_id: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_events WHERE session_id=? "
+                "ORDER BY seq DESC LIMIT ?",
+                (session_id, min(2000, max(1, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def trim_chat_events(self, session_id: str, keep: int = 5000) -> int:
+        """Keep only the newest events for a session; returns rows deleted."""
+        keep = max(1, int(keep))
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM chat_events WHERE session_id=? AND seq NOT IN ("
+                "SELECT seq FROM chat_events WHERE session_id=? "
+                "ORDER BY seq DESC LIMIT ?)",
+                (session_id, session_id, keep),
+            )
+        return cur.rowcount
+
+    def chat_event_count(self, session_id: str) -> int:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM chat_events WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return int(row[0])
+
+    def search_chat_events(
+        self, session_id: str, query: str, limit: int = 50
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Case-insensitive payload search, oldest first.
+
+        Plain ``LIKE`` is enough at this scale.  Returns
+        ``(rows, has_more)`` where ``has_more`` says a further match exists
+        beyond ``limit``.
+        """
+        limit = min(200, max(1, int(limit)))
+        needle = (
+            str(query)
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_events WHERE session_id=? "
+                "AND payload LIKE ? ESCAPE '\\' ORDER BY seq ASC LIMIT ?",
+                (session_id, f"%{needle}%", limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        return [dict(row) for row in rows[:limit]], has_more
+
+    def chat_permission_create(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = iso()
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO chat_permissions"
+                "(id,session_id,turn_id,request_id,tool_name,tool_input,suggestions,"
+                "status,decision,resolved_by,created_at,resolved_at,delivered_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["id"],
+                    row["session_id"],
+                    row.get("turn_id") or "",
+                    row.get("request_id") or "",
+                    row.get("tool_name") or "",
+                    row.get("tool_input") or "{}",
+                    row.get("suggestions") or "[]",
+                    row.get("status") or "pending",
+                    row.get("decision") or "",
+                    row.get("resolved_by") or "",
+                    row.get("created_at") or now,
+                    row.get("resolved_at"),
+                    row.get("delivered_at"),
+                    row.get("expires_at"),
+                ),
+            )
+            self.conn.execute(
+                "UPDATE chat_state SET pending_count=("
+                "SELECT COUNT(*) FROM chat_permissions "
+                "WHERE session_id=? AND status='pending'), updated_at=? "
+                "WHERE session_id=?",
+                (row["session_id"], now, row["session_id"]),
+            )
+        return self.chat_permission_get(row["id"]) or row
+
+    def chat_permission_get(self, permission_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM chat_permissions WHERE id=?", (permission_id,)
+            ).fetchone()
+        return _row(row)
+
+    def chat_permissions_pending(self, session_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_permissions WHERE session_id=? AND status='pending' "
+                "ORDER BY created_at ASC",
+                (session_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def chat_permission_resolve(
+        self,
+        permission_id: str,
+        *,
+        status: str,
+        decision: str,
+        resolved_by: str,
+    ) -> dict[str, Any] | None:
+        """Atomically resolve a pending permission.  Returns None if already resolved."""
+        now = iso()
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE chat_permissions SET status=?, decision=?, resolved_by=?, "
+                "resolved_at=? WHERE id=? AND status='pending'",
+                (status, decision, resolved_by, now, permission_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = self.conn.execute(
+                "SELECT * FROM chat_permissions WHERE id=?", (permission_id,)
+            ).fetchone()
+            if row is not None:
+                self.conn.execute(
+                    "UPDATE chat_state SET pending_count=("
+                    "SELECT COUNT(*) FROM chat_permissions "
+                    "WHERE session_id=? AND status='pending'), updated_at=? "
+                    "WHERE session_id=?",
+                    (row["session_id"], now, row["session_id"]),
+                )
+        return _row(row)
+
+    def chat_permissions_stale(self, before: str) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_permissions WHERE status='pending' "
+                "AND expires_at IS NOT NULL AND expires_at < ?",
+                (before,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def chat_permissions_undelivered(self, session_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_permissions WHERE session_id=? "
+                "AND status IN ('allowed','denied','expired') "
+                "AND delivered_at IS NULL ORDER BY created_at ASC",
+                (session_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def chat_permission_mark_delivered(self, permission_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE chat_permissions SET delivered_at=? WHERE id=?",
+                (iso(), permission_id),
+            )
+
+    def chat_permission_expire(self, permission_id: str) -> dict[str, Any] | None:
+        return self.chat_permission_resolve(
+            permission_id,
+            status="expired",
+            decision=json.dumps(
+                {"behavior": "deny", "message": "No answer before the permission timeout."}
+            ),
+            resolved_by="timeout",
+        )
+
+    def chat_permissions_expire_session(self, session_id: str) -> list[dict[str, Any]]:
+        expired = []
+        for row in self.chat_permissions_pending(session_id):
+            resolved = self.chat_permission_expire(row["id"])
+            if resolved is not None:
+                expired.append(resolved)
+        return expired
+
+    def claim_chat_input(self, session_id: str, client_msg_id: str) -> bool:
+        """Return True when this client_msg_id is new, False when already seen."""
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO chat_inputs"
+                "(session_id,client_msg_id,seq,created_at) VALUES(?,?,NULL,?)",
+                (session_id, client_msg_id, iso()),
+            )
+        return cur.rowcount > 0
+
+    def delete_chat_input(self, session_id: str, client_msg_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "DELETE FROM chat_inputs WHERE session_id=? AND client_msg_id=?",
+                (session_id, client_msg_id),
+            )
+
+    def chat_read_set(self, user_id: int, session_id: str, last_seq: int) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO chat_reads(user_id,session_id,last_seq,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(user_id,session_id) DO UPDATE SET "
+                "last_seq=MAX(chat_reads.last_seq,excluded.last_seq), "
+                "updated_at=excluded.updated_at",
+                (user_id, session_id, int(last_seq), iso()),
+            )
+
+    def chat_read_get(self, user_id: int, session_id: str) -> int:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT last_seq FROM chat_reads WHERE user_id=? AND session_id=?",
+                (user_id, session_id),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def chat_unread(self, user_id: int, session_id: str) -> int:
+        last = self.chat_read_get(user_id, session_id)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM chat_events WHERE session_id=? "
+                "AND seq>? AND kind IN ('assistant_block','result','permission')",
+                (session_id, last),
+            ).fetchone()
+        return int(row[0])
+
+    def chat_checkpoint_add(
+        self, session_id: str, checkpoint_uuid: str, event_seq: int
+    ) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO chat_checkpoints"
+                "(session_id,checkpoint_uuid,event_seq,created_at) VALUES(?,?,?,?)",
+                (session_id, checkpoint_uuid, int(event_seq), iso()),
+            )
+
+    def chat_checkpoints(self, session_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM chat_checkpoints WHERE session_id=? "
+                "ORDER BY event_seq ASC",
+                (session_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_chat_history(self, session_id: str) -> int:
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM chat_events WHERE session_id=?", (session_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM chat_permissions WHERE session_id=?", (session_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM chat_checkpoints WHERE session_id=?", (session_id,)
+            )
+            self.conn.execute("DELETE FROM chat_inputs WHERE session_id=?", (session_id,))
+            self.conn.execute(
+                "UPDATE chat_state SET last_seq=0, last_event_at=NULL, "
+                "pending_count=0, updated_at=? WHERE session_id=?",
+                (iso(), session_id),
+            )
+        return cur.rowcount
+
+    def purge_chat(self, retention_days: int = 30) -> int:
+        from datetime import timedelta
+
+        cutoff = iso(utcnow() - timedelta(days=max(1, int(retention_days))))
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM chat_events WHERE created_at < ?", (cutoff,)
+            )
+            self.conn.execute(
+                "DELETE FROM chat_permissions WHERE created_at < ? "
+                "AND status != 'pending'",
+                (cutoff,),
             )
         return cur.rowcount
 

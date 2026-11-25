@@ -233,10 +233,12 @@ class DatabaseTest(unittest.TestCase):
             self.assertIn("usage_minutes", tables)
             self.assertIn("instance_minutes", tables)
             self.assertIn("messages", tables)
+            self.assertIn("chat_events", tables)
+            self.assertIn("chat_permissions", tables)
             version = db.conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0]
-            self.assertEqual(version, "3")
+            self.assertEqual(version, "4")
         finally:
             db.close()
 

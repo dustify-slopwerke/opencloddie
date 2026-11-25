@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__
 from .auth import ApiIdentity, AuthError, WebIdentity, api_identity, web_identity
+from .chat import ChatBroker, ChatError
 from .config import APP_NAME
 from .crypto import decrypt_secret, encrypt_secret
 from .db import MailboxFull
@@ -105,6 +106,7 @@ class App:
         self._metrics_lock = threading.Lock()
         self.gateway = Gateway(cfg, self.db, self.metrics)
         self.hub = AgentHub(self)
+        self.chat = ChatBroker(self)
         messages_cfg = cfg.get("messages") or {}
         self.messages_cfg = messages_cfg
         self.messages_enabled = bool(messages_cfg.get("enabled", True))
@@ -417,6 +419,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._dispatch_api(method)
             else:
                 self._dispatch_web(method)
+        except ChatError as exc:
+            if getattr(self, "_response_started", False):
+                self.close_connection = True
+                return
+            self._send_api_error(exc.status, exc.message, exc.code)
         except AuthError as exc:
             if getattr(self, "_response_started", False):
                 self.close_connection = True
@@ -482,6 +489,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/vendor/") or path in (
             "/app.js",
             "/stats.js",
+            "/chat.js",
+            "/chat-render.js",
+            "/chat.css",
             "/style.css",
             "/favicon.svg",
             "/manifest.webmanifest",
@@ -534,6 +544,12 @@ class Handler(BaseHTTPRequestHandler):
                         app.models, user.get("default_model"), app.default_model
                     ),
                     "messages_enabled": app.messages_enabled,
+                    "features": {"chat": bool(app.chat.enabled)},
+                    "chat": {
+                        "max_image_bytes": app.chat.max_image_bytes,
+                        "max_input_images": app.chat.max_input_images,
+                        "max_inline_event_image_bytes": app.chat.max_inline_event_image_bytes,
+                    },
                     "urls": urls,
                     "install": {
                         "command": (
@@ -709,6 +725,7 @@ class Handler(BaseHTTPRequestHandler):
             if not session or session["user_id"] != identity.user_id:
                 raise AuthError(404, "session not found", "not_found")
             if method == "DELETE":
+                app.chat.session_removed(session_id)
                 app.hub.close_session(session_id, kill=True)
                 app.db.delete_session(session_id, identity.user_id)
                 return self._send_json(200, {"ok": True})
@@ -732,6 +749,168 @@ class Handler(BaseHTTPRequestHandler):
             if not session or session["user_id"] != identity.user_id:
                 raise AuthError(404, "session not found", "not_found")
             return self._web_terminal_ws(session)
+
+        match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/chat/ws", path)
+        if match:
+            if not app.chat.enabled:
+                raise AuthError(404, "chat is disabled", "chat_disabled")
+            session_id = match.group(1)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            return self._web_chat_ws(session)
+
+        match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/chat", path)
+        if match:
+            if not app.chat.enabled:
+                raise AuthError(404, "chat is disabled", "chat_disabled")
+            session_id = match.group(1)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            if method in ("GET", "HEAD"):
+                query = self._query()
+                limit = _int_param(query, "limit", 200)
+                after = _int_param(query, "after_seq", 0, minimum=0)
+                before = _int_param(query, "before_seq", 0, minimum=0)
+                if after:
+                    events = app.db.chat_events_after(session_id, after, limit)
+                elif before:
+                    events = app.db.chat_events_before(session_id, before, limit)
+                else:
+                    events = app.db.latest_chat_events(session_id, limit)
+                state = app.chat.public_state(session_id, identity.user_id)
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "chat": state,
+                        "events": [app.chat.public_event(row) for row in events],
+                        "pending": [
+                            app.chat.public_permission(row)
+                            for row in app.db.chat_permissions_pending(session_id)
+                        ],
+                        "checkpoints": [
+                            {
+                                "uuid": row.get("checkpoint_uuid"),
+                                "event_seq": int(row.get("event_seq") or 0),
+                            }
+                            for row in app.db.chat_checkpoints(session_id)
+                        ],
+                        "last_seq": state["last_seq"],
+                        "has_more": bool(
+                            events
+                            and app.db.chat_event_count(session_id) > len(events)
+                        ),
+                    },
+                )
+            raise AuthError(405, "method not allowed")
+
+        match = re.fullmatch(
+            r"/api/sessions/([A-Za-z0-9_-]+)/chat/search", path
+        )
+        if match:
+            if not app.chat.enabled:
+                raise AuthError(404, "chat is disabled", "chat_disabled")
+            session_id = match.group(1)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            if method not in ("GET", "HEAD"):
+                raise AuthError(405, "method not allowed")
+            query = self._query()
+            text = (query.get("q") or [""])[0].strip()
+            if not text:
+                raise ChatError(400, "q is required", "invalid")
+            limit = _int_param(query, "limit", 50)
+            rows, has_more = app.db.search_chat_events(session_id, text, limit)
+            return self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "query": text,
+                    "events": [app.chat.public_event(row) for row in rows],
+                    "has_more": bool(has_more),
+                },
+            )
+
+        match = re.fullmatch(
+            r"/api/sessions/([A-Za-z0-9_-]+)/chat/(input|interrupt|mode|read|history|config|rewind)",
+            path,
+        )
+        if match:
+            if not app.chat.enabled:
+                raise AuthError(404, "chat is disabled", "chat_disabled")
+            session_id, action = match.group(1), match.group(2)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            if action == "history" and method == "DELETE":
+                deleted = app.chat.delete_history(session_id, identity.user_id)
+                return self._send_json(200, {"ok": True, "deleted": deleted})
+            if method not in ("POST", "PUT"):
+                raise AuthError(405, "method not allowed")
+            body = self._json_body()
+            if action == "input":
+                result = app.chat.send_input(
+                    session_id,
+                    identity.user_id,
+                    body.get("content", ""),
+                    str(body.get("client_msg_id") or ""),
+                )
+                return self._send_json(200, {"ok": True, **result})
+            if action == "interrupt":
+                app.chat.interrupt(session_id, identity.user_id)
+                return self._send_json(200, {"ok": True})
+            if action == "mode":
+                app.chat.request_mode(
+                    session_id,
+                    identity.user_id,
+                    str(body.get("mode") or "chat"),
+                    force=bool(body.get("force")),
+                )
+                return self._send_json(202, {"ok": True})
+            if action == "read":
+                app.chat.mark_read(
+                    session_id, identity.user_id, int(body.get("last_seq") or 0)
+                )
+                return self._send_json(200, {"ok": True})
+            if action == "config":
+                app.chat.request_config(
+                    session_id,
+                    identity.user_id,
+                    permission_mode=body.get("permission_mode"),
+                    model=body.get("model"),
+                    force=bool(body.get("force")),
+                )
+                return self._send_json(202, {"ok": True})
+            if action == "rewind":
+                app.chat.request_rewind(
+                    session_id,
+                    identity.user_id,
+                    str(body.get("checkpoint_uuid") or ""),
+                    force=bool(body.get("force")),
+                )
+                return self._send_json(202, {"ok": True})
+            raise AuthError(405, "method not allowed")
+
+        match = re.fullmatch(
+            r"/api/sessions/([A-Za-z0-9_-]+)/chat/permissions/([A-Za-z0-9_-]+)", path
+        )
+        if match:
+            if not app.chat.enabled:
+                raise AuthError(404, "chat is disabled", "chat_disabled")
+            session_id, permission_id = match.group(1), match.group(2)
+            session = app.db.get_session(session_id)
+            if not session or session["user_id"] != identity.user_id:
+                raise AuthError(404, "session not found", "not_found")
+            if method not in ("POST", "PUT"):
+                raise AuthError(405, "method not allowed")
+            body = self._json_body()
+            result = app.chat.decide_permission(
+                session_id, identity.user_id, permission_id, body
+            )
+            return self._send_json(200, {"ok": True, **result})
 
         match = re.fullmatch(r"/api/sessions/([A-Za-z0-9_-]+)/messages", path)
         if match:
@@ -936,6 +1115,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _public_session(self, session: dict[str, Any], *, unread: int = 0) -> dict[str, Any]:
         agent = self.app.hub.get_for_session(session["id"])
+        chat = None
+        if self.app.chat.enabled:
+            state = self.app.chat.public_state(session["id"], session["user_id"])
+            chat = {
+                "mode": state["mode"],
+                "status": state["status"],
+                "pending": state["pending_count"],
+                "unread": state["unread"],
+                "last_seq": state["last_seq"],
+            }
         return {
             "id": session["id"],
             "name": session["name"],
@@ -950,6 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
             "last_seen": human_age(session.get("last_seen_at")),
             "viewers": len(agent.channels) if agent else 0,
             "unread": int(unread),
+            "chat": chat,
         }
 
     # -------------------------------------------------------------- ws: web
@@ -1084,6 +1274,151 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def _web_chat_ws(self, session: dict[str, Any]) -> None:
+        self._check_ws_origin()
+        ws = self._accept_websocket()
+        session_id = session["id"]
+        query = self._query()
+        after = _int_param(query, "after_seq", 0, minimum=0)
+        viewer_id = -1
+        try:
+            viewer_id, q, snap = self.app.chat.attach_with_snapshot(
+                session_id, after_seq=after, limit=200
+            )
+            state = self.app.chat.public_state(session_id, session["user_id"])
+            ws.send_text(
+                json.dumps(
+                    {
+                        "t": "hello",
+                        "session": self._public_session(
+                            self.app.db.get_session(session_id) or session
+                        ),
+                        "chat": state,
+                        "pending": snap["pending"],
+                        "events": snap["events"],
+                        "checkpoints": [
+                            {
+                                "uuid": row.get("checkpoint_uuid"),
+                                "event_seq": int(row.get("event_seq") or 0),
+                            }
+                            for row in self.app.db.chat_checkpoints(session_id)
+                        ],
+                        "last_seq": state["last_seq"],
+                    }
+                )
+            )
+        except (OSError, WebSocketError, ChatError) as exc:
+            try:
+                if isinstance(exc, ChatError):
+                    ws.send_text(
+                        json.dumps({"t": "error", "message": exc.message, "code": exc.code})
+                    )
+                ws.close()
+            except (OSError, WebSocketError):
+                pass
+            self.app.chat.detach_viewer(session_id, viewer_id)
+            return
+
+        stop = threading.Event()
+
+        def pump() -> None:
+            while not stop.is_set():
+                try:
+                    frame = q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    ws.send_text(json.dumps(frame))
+                except (OSError, WSClosed, WebSocketError):
+                    break
+            stop.set()
+
+        threading.Thread(
+            target=pump, name=f"chat-{session_id}", daemon=True
+        ).start()
+
+        def send_error(message: str, code: str = "chat_error") -> None:
+            try:
+                ws.send_text(json.dumps({"t": "error", "message": message, "code": code}))
+            except (OSError, WebSocketError):
+                pass
+
+        try:
+            while not stop.is_set():
+                opcode, payload = ws.recv()
+                if opcode != OP_TEXT:
+                    continue
+                try:
+                    message = json.loads(payload.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                kind = message.get("t")
+                try:
+                    if kind == "input":
+                        self.app.chat.send_input(
+                            session_id,
+                            session["user_id"],
+                            message.get("content", ""),
+                            str(message.get("client_msg_id") or ""),
+                        )
+                    elif kind == "permission":
+                        self.app.chat.decide_permission(
+                            session_id,
+                            session["user_id"],
+                            str(message.get("permission_id") or ""),
+                            message,
+                        )
+                    elif kind == "interrupt":
+                        self.app.chat.interrupt(session_id, session["user_id"])
+                    elif kind == "handoff":
+                        self.app.chat.request_mode(
+                            session_id,
+                            session["user_id"],
+                            str(message.get("to") or "tui"),
+                            force=bool(message.get("force")),
+                        )
+                    elif kind == "read":
+                        self.app.chat.mark_read(
+                            session_id,
+                            session["user_id"],
+                            int(message.get("last_seq") or 0),
+                        )
+                    elif kind == "resync":
+                        seq = int(message.get("after_seq") or 0)
+                        rows = self.app.db.chat_events_after(session_id, seq, 500)
+                        for row in rows:
+                            ws.send_text(
+                                json.dumps(
+                                    {
+                                        "t": "event",
+                                        **self.app.chat.public_event(row),
+                                    }
+                                )
+                            )
+                        ws.send_text(
+                            json.dumps(
+                                {
+                                    "t": "state",
+                                    "chat": self.app.chat.public_state(
+                                        session_id, session["user_id"]
+                                    ),
+                                }
+                            )
+                        )
+                    elif kind == "ping":
+                        ws.send_text(json.dumps({"t": "pong"}))
+                except ChatError as exc:
+                    send_error(exc.message, exc.code)
+        except (WSClosed, OSError, WebSocketError):
+            pass
+        finally:
+            stop.set()
+            self.app.chat.detach_viewer(session_id, viewer_id)
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+
     # ------------------------------------------------------------- api mode
     def _dispatch_api(self, method: str) -> None:
         path, _ = self._path_query()
@@ -1158,6 +1493,20 @@ class Handler(BaseHTTPRequestHandler):
                     "models": app.models,
                     "opencode_key_set": bool(identity.opencode_key_enc),
                     "messages_enabled": app.messages_enabled,
+                    "features": {"chat": bool(app.chat.enabled)},
+                    "chat": {
+                        "max_event_bytes": app.chat.max_event_bytes,
+                        "max_tool_result_bytes": app.chat.max_tool_result_bytes,
+                        "max_image_bytes": app.chat.max_image_bytes,
+                        "max_input_images": app.chat.max_input_images,
+                        "max_inline_event_image_bytes": (
+                            app.chat.max_inline_event_image_bytes
+                        ),
+                        "permission_timeout_seconds": app.chat.permission_timeout,
+                        "min_claude_version": (app.cfg.get("chat") or {}).get(
+                            "min_claude_version", "2.1.300"
+                        ),
+                    },
                     "gateway_base_url": urls["api"],
                     "web_url": urls["web"],
                     "install": {
@@ -1191,6 +1540,7 @@ class Handler(BaseHTTPRequestHandler):
             if not session or session["user_id"] != identity.user_id:
                 raise AuthError(404, "session not found", "not_found")
             if method == "DELETE":
+                app.chat.session_removed(session_id)
                 app.hub.close_session(session_id, kill=True)
                 app.db.delete_session(session_id, identity.user_id)
                 return self._send_json(200, {"ok": True})
@@ -1473,12 +1823,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
 
 
-def _int_param(query: dict[str, list[str]], name: str, default: int) -> int:
+def _int_param(
+    query: dict[str, list[str]], name: str, default: int, minimum: int = 1
+) -> int:
     try:
         value = int((query.get(name) or [default])[0])
     except (TypeError, ValueError):
         return default
-    return max(1, min(value, 500))
+    return max(minimum, min(value, 500))
 
 
 def _install_page(api_url: str, web_url: str) -> str:

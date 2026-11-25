@@ -178,6 +178,39 @@ and `tmux kill-session -t NAME`, then delete the remote row in the web UI.
 The session is registered by that machine's agent.  If it is offline, the agent
 there must reconnect; `stop` from any machine sends `kill` to a live agent.
 
+### Structured chat
+
+**`this server does not support chat sessions yet`**
+The server predates `features.chat` (0.6).  Upgrade the server, or use
+`opencloddie run` without `--chat`.
+
+**`chat requires Claude Code 2.1.300+`**
+Upgrade the client host's Claude Code.  The runner refuses older versions rather
+than guessing at stream-json fields.
+
+**The web chat shows "permission MCP server missing" / chat refuses to start**
+The generated `mcp-permissions-<sid>.json` is missing or unreadable.  Check the
+client's cache dir (`~/.cache/opencloddie`), rerun with `--chat`, and make sure
+Claude Code can start MCP stdio servers.  Approvals fail closed: chat will not
+run without an approval path.
+
+**A tool is waiting for approval but no browser was open**
+Approvals are persisted.  Open the session; the pending card is replayed, or the
+request expires to a denial after `chat.permission_timeout_seconds`.  Check the
+session tab badge / `pending` count.
+
+**Handoff to terminal says the conversation is gone**
+Chat and the TUI share the Claude session id.  A chat→TUI handoff uses
+`--resume <uuid>` in the same tmux pane; the web transcript starts a new boundary
+and does not import earlier TUI history.  Claude still has its context.  If the
+session was created before 0.6, restart it once with the new client to get a
+preassigned id.
+
+**Chat history is growing / contains sensitive output**
+Set `chat.retention_days`, use the session's delete-history action, or set
+`chat.persist=false` for live-only streaming.  The history is plaintext in the
+same SQLite database as the mailbox.
+
 ## Docker / nginx
 
 **502 from nginx**

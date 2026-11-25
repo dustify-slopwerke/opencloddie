@@ -70,6 +70,28 @@ headers/body and can emit JSON or SSE.
 80 tests.  Each test creates isolated temp configs/databases and ephemeral
 ports; no fixed ports, no network, no reliance on the developer's state.
 
+### Structured chat protocol validation
+
+`docs/CHAT-PROTOCOL.md` records the Phase 0 results for the chat runtime
+(Claude Code 2.1.332).  Those were produced by running the real `claude`
+headless against a scripted fake Anthropic upstream, so they cost no inference
+tokens.  When changing the launch flags or event normalization:
+
+1. Keep a scripted upstream that emits `message_start`, content blocks (text or
+   `tool_use`), `message_delta` and `message_stop`, and records request bodies.
+2. Run `claude -p --input-format stream-json --output-format stream-json
+   --verbose --include-partial-messages` with a clean `HOME`/`CLAUDE_CONFIG_DIR`
+   and the gateway env; do not use the real API.
+3. Re-check the permission tool with a tiny stdio MCP server (`Bash`,
+   `AskUserQuestion`, `ExitPlanMode`), and `--resume` in both directions.
+4. Update `docs/CHAT-PROTOCOL.md` and the fixtures before changing code that
+   depends on the shapes.
+
+Known validation limits: SIGINT ends the headless process (interrupt is
+kill+resume); the `ExitPlanMode` approval request carries an empty input (read
+the plan from the assistant `tool_use` block); TUI handoff uses the same Claude
+session store but is only exercised manually today.
+
 ### Adding a test
 
 1. Use `tests/harness.py:TestServer` (starts both listeners on port 0 and

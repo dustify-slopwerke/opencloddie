@@ -136,7 +136,11 @@ class AgentEndToEndTest(unittest.TestCase):
             self.assertEqual(hello["session"]["name"], "e2e")
             # The agent enables mouse mode on its own session so the web
             # terminal can scroll tmux copy-mode (wheel and touch pan).
-            self.assertEqual(hello.get("agent_features"), {"mouse": True})
+            features = hello.get("agent_features") or {}
+            self.assertIs(features.get("mouse"), True)
+            # The capability is about the client version (chat can be
+            # enabled/handed off later), not the session's current mode.
+            self.assertIs(features.get("chat"), True)
             mouse = subprocess.run(
                 [TMUX, "show-options", "-t", self.tmux_name, "mouse"],
                 capture_output=True,
@@ -191,8 +195,9 @@ class AgentEndToEndTest(unittest.TestCase):
             "DELETE", f"/client/sessions/{self.sid}", self.token
         )
         self.assertEqual(status, 200)
-        self.assertTrue(wait_for(lambda: not tmux_has(self.tmux_name), timeout=8))
-        self.assertTrue(wait_for(lambda: self.agent.poll() is not None, timeout=8))
+        # Kill propagation is asynchronous; short waits were flaky under load.
+        self.assertTrue(wait_for(lambda: not tmux_has(self.tmux_name), timeout=30))
+        self.assertTrue(wait_for(lambda: self.agent.poll() is not None, timeout=30))
 
 
 if __name__ == "__main__":

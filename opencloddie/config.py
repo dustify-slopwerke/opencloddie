@@ -79,6 +79,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_unread_per_session": 500,
         "rate_limit_per_minute": 60,
     },
+    "chat": {
+        # Structured (headless stream-json) sessions.  Chat history is stored
+        # in the same SQLite database as everything else; terminal output was
+        # never persisted, so this is a deliberate new privacy surface.
+        "enabled": True,
+        "persist": True,
+        "retention_days": 30,
+        "max_events_per_session": 5000,
+        "max_event_bytes": 2 * 1024 * 1024,
+        "max_tool_result_bytes": 64 * 1024,
+        "max_input_text_bytes": 256 * 1024,
+        # Phase 2 image input.  Images are decoded server-side; the per-image
+        # cap applies to the decoded bytes and the count caps one message.
+        "max_image_bytes": 5 * 1024 * 1024,
+        "max_input_images": 4,
+        # Transcript events keep an image inline (as a data: URL) up to this
+        # decoded size; larger ones become a placeholder block.
+        "max_inline_event_image_bytes": 1 * 1024 * 1024,
+        "permission_timeout_seconds": 300,
+        "auto_restart": True,
+        "store_tool_outputs": True,
+        "min_claude_version": "2.1.300",
+    },
     "database": {
         "path": "",
     },
@@ -231,6 +254,33 @@ def _validate(cfg: dict[str, Any]) -> None:
         messages[key] = min(high, max(low, value))
     messages["enabled"] = enabled
     cfg["messages"] = messages
+
+    chat = cfg.get("chat")
+    if chat is None:
+        chat = {}
+    if not isinstance(chat, dict):
+        raise ValueError("chat must be a JSON object")
+    for key in ("enabled", "persist", "auto_restart", "store_tool_outputs"):
+        if not isinstance(chat.get(key, True), bool):
+            raise ValueError(f"chat.{key} must be true or false")
+    chat_numeric: dict[str, tuple[int, int, int]] = {
+        "retention_days": (30, 1, 365),
+        "max_events_per_session": (5000, 100, 100000),
+        "max_event_bytes": (2 * 1024 * 1024, 4096, 8 * 1024 * 1024),
+        "max_tool_result_bytes": (64 * 1024, 1024, 4 * 1024 * 1024),
+        "max_input_text_bytes": (256 * 1024, 1024, 8 * 1024 * 1024),
+        "max_image_bytes": (5 * 1024 * 1024, 1024, 32 * 1024 * 1024),
+        "max_input_images": (4, 0, 16),
+        "max_inline_event_image_bytes": (1 * 1024 * 1024, 0, 8 * 1024 * 1024),
+        "permission_timeout_seconds": (300, 10, 86400),
+    }
+    for key, (default, low, high) in chat_numeric.items():
+        try:
+            value = int(chat.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"chat.{key} must be a number") from exc
+        chat[key] = min(high, max(low, value))
+    cfg["chat"] = chat
 
 
 def build_default_config(*, dev: bool = False) -> dict[str, Any]:

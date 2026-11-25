@@ -17,6 +17,7 @@ const state = {
   usage: null,
   usagePoll: null,
   booted: false,
+  terminalHint: '',
 };
 
 const TMUX_BUFFER_FRESH_SECONDS = 120;
@@ -409,6 +410,29 @@ function confirmDialog(title, message, { confirmLabel = 'Confirm', danger = fals
 }
 
 /* ---------------------------------------------------------------- boot */
+function hashSessionId() {
+  const match = /(?:^#|&)session=([^&]+)/.exec(location.hash || '');
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]);
+  } catch (_) {
+    return match[1];
+  }
+}
+
+function openHashSession() {
+  const id = hashSessionId();
+  if (!id) return false;
+  const session = state.sessions.find((s) => s.id === id);
+  if (!session) return false;
+  state.activeId = id;
+  safeStorageSet('opencloddie.active', id);
+  if (isChatSession(session) && state.layout === 'tile') setLayout('single');
+  setView('sessions');
+  activate(id, { quiet: true });
+  return true;
+}
+
 async function boot() {
   try {
     state.me = await api('/api/me');
@@ -442,8 +466,13 @@ async function boot() {
   $('#app').hidden = false;
   state.booted = true;
   syncViewportHeight();
+  openHashSession();
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  $('#status-hint').textContent = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Insert copy · Shift+Insert paste';
+  state.terminalHint = isMac ? '⌘C copy · ⌘V paste' : 'Ctrl+Insert copy · Shift+Insert paste';
+  const bootActive = activeSession();
+  $('#status-hint').textContent = bootActive && isChatSession(bootActive)
+    ? 'Enter send · Shift+Enter newline'
+    : state.terminalHint;
   setTimeout(() => {
     if (state.layout === 'tile') {
       layoutTiles();
@@ -464,6 +493,7 @@ async function boot() {
       if (state.view === 'sessions') loadUsage();
     }
   });
+  window.addEventListener('hashchange', () => openHashSession());
 }
 
 function renderIdentity() {
@@ -619,6 +649,12 @@ function setView(view) {
       if (entry) setTimeout(() => { fitTerminal(entry); focusTerminal(entry); }, 30);
     }
   }
+  const active = activeSession();
+  if (view === 'sessions' && state.layout === 'single' && active && isChatSession(active)) {
+    showChatPane(active);
+  } else {
+    showTerminalPane();
+  }
 }
 
 function renderTopbar() {
@@ -631,7 +667,34 @@ function renderTopbar() {
         h('button', { class: 'btn btn-sm', text: 'Mailbox', title: 'Read and send session messages', onclick: () => mailboxModal() }),
       );
     }
-    if (active) {
+    if (active && active.chat) {
+      const pending = Number(active.chat.pending || 0);
+      if (pending > 0 && window.ChatView) {
+        root.append(
+          h('button', {
+            class: 'badge chat-pending-badge topbar-pending',
+            type: 'button',
+            text: `${pending} pending`,
+            title: `${pending} pending approval(s)`,
+            onclick: () => ChatView.focusPending(),
+          }),
+        );
+      }
+      const chatMode = isChatSession(active);
+      root.append(
+        h('button', {
+          class: 'btn btn-sm chat-toggle-btn',
+          type: 'button',
+          text: chatMode ? 'Terminal' : 'Chat',
+          title: active.online
+            ? (chatMode ? 'Switch to the terminal view' : 'Switch to structured chat')
+            : 'Start the session to switch modes',
+          disabled: active.online ? undefined : true,
+          onclick: () => requestHandoff(active, chatMode ? 'tui' : 'chat'),
+        }),
+      );
+    }
+    if (active && !isChatSession(active)) {
       root.append(
         h('button', { class: 'btn btn-sm', text: 'Copy', title: 'Copy selection, recent tmux buffer, or visible screen', onclick: copySelection }),
       );
@@ -694,6 +757,20 @@ function renderLayoutToggle() {
 
 function setLayout(mode, { persist = true } = {}) {
   if (mode !== 'single' && mode !== 'tile') return;
+  if (mode === 'tile') {
+    const active = activeSession();
+    if (active && isChatSession(active)) {
+      const next = state.sessions.find((s) => !state.hidden.has(s.id) && !isChatSession(s) && s.online)
+        || state.sessions.find((s) => !state.hidden.has(s.id) && !isChatSession(s));
+      if (!next) {
+        toast('Chat sessions use single layout', 'warn');
+        return;
+      }
+      state.activeId = next.id;
+      safeStorageSet('opencloddie.active', next.id);
+      showTerminalPane();
+    }
+  }
   closeHiddenMenu();
   state.layout = mode;
   if (persist) safeStorageSet('opencloddie.layout', mode);
@@ -703,6 +780,7 @@ function setLayout(mode, { persist = true } = {}) {
     state.activeId = preferred.id;
   }
   if (mode === 'tile') {
+    showTerminalPane();
     layoutTiles();
     renderTopbar();
     return;
@@ -788,6 +866,9 @@ function layoutTiles() {
     const entry = ensureTerminal(session);
     entry.el.classList.remove('hidden');
     updateTileHeader(entry, session);
+    if (!isChatSession(session) && session.online && !entry.ws && !entry.retryTimer) {
+      connectTerminal(entry, session);
+    }
   }
   updateTilesActive();
   const active = activeSession();
@@ -810,17 +891,21 @@ function updateTilesActive() {
 
 function updateTileHeader(entry, session) {
   if (!entry.headName) return;
+  const chatSession = isChatSession(session);
   entry.headDot.className = session.online ? 'dot online' : 'dot';
   entry.headName.textContent = session.name;
-  entry.headModel.textContent = session.model || '';
-  entry.el.title = `${session.name}\n${session.hostname || ''} · ${session.cwd || ''}\n${session.model || ''}`;
-  entry.offlineEl.hidden = Boolean(session.online);
+  entry.headModel.textContent = chatSession ? 'chat' : (session.model || '');
+  entry.el.title = `${session.name}\n${session.hostname || ''} · ${session.cwd || ''}\n${chatSession ? 'structured chat' : (session.model || '')}`;
+  entry.offlineEl.hidden = Boolean(session.online) && !chatSession;
   if (!session.online) {
     entry.offlineEl.textContent = session.last_seen
       ? `Offline · last seen ${session.last_seen}`
       : 'Offline';
+  } else if (chatSession) {
+    entry.offlineEl.textContent = 'Chat session — open it to view';
   }
   entry.el.classList.toggle('is-offline', !session.online);
+  entry.el.classList.toggle('is-chat-session', chatSession);
 }
 
 /* ---------------------------------------------------------------- sessions */
@@ -854,11 +939,15 @@ async function loadSessions({ quiet = false } = {}) {
       updateTileHeader(entry, session);
       if (wasOnline && !session.online) disconnectTerminal(entry);
       if (!wasOnline && session.online) connectTerminal(entry, session);
+      if (isChatSession(session) && (entry.ws || entry.retryTimer)) disconnectTerminal(entry);
     }
   }
   // Drop terminals for sessions removed elsewhere.
   for (const id of Array.from(state.terminals.keys())) {
     if (!state.sessions.some((s) => s.id === id)) destroyTerminal(id);
+  }
+  for (const id of previous.keys()) {
+    if (!state.sessions.some((s) => s.id === id) && window.ChatView) ChatView.destroy(id);
   }
   if (state.sessions.length && !state.sessions.some((s) => s.id === state.activeId)) {
     const saved = safeStorageGet('opencloddie.active');
@@ -868,6 +957,20 @@ async function loadSessions({ quiet = false } = {}) {
     state.activeId = candidate.id;
   }
   if (!state.sessions.length) state.activeId = null;
+  // A chat/terminal handoff changes the active session's presentation.  Force
+  // single layout for chat and re-activate so the correct pane is visible.
+  const activeNow = state.sessions.find((s) => s.id === state.activeId) || null;
+  const activeBefore = previousActive ? previous.get(previousActive) : null;
+  const modeBefore = activeBefore && activeBefore.chat ? activeBefore.chat.mode : null;
+  const modeAfter = activeNow && activeNow.chat ? activeNow.chat.mode : null;
+  if (state.view === 'sessions' && activeNow && modeBefore !== modeAfter) {
+    if (isChatSession(activeNow) && state.layout === 'tile') {
+      state.layout = 'single';
+      safeStorageSet('opencloddie.layout', 'single');
+      applyLayoutChrome();
+    }
+    activate(activeNow.id, { quiet: true });
+  }
   renderTabs();
   if (state.layout === 'tile') {
     if (state.sessions.length) {
@@ -887,6 +990,19 @@ async function loadSessions({ quiet = false } = {}) {
     $('#status-active').textContent = 'No session selected';
   }
   updateSubtitle();
+  if (state.view === 'sessions') {
+    const activeChat = state.sessions.find((s) => s.id === state.activeId);
+    if (activeChat && isChatSession(activeChat)) {
+      if (state.layout === 'tile') {
+        state.layout = 'single';
+        safeStorageSet('opencloddie.layout', 'single');
+        applyLayoutChrome();
+      }
+      showChatPane(activeChat);
+    } else if (state.layout === 'single') {
+      showTerminalPane();
+    }
+  }
   // A new session can become active without a tab click (the first session,
   // or the active one disappearing).  Rebuild the action bar in that case.
   if (!quiet || previousActive !== state.activeId || previousHidden !== state.hidden.size) renderTopbar();
@@ -894,6 +1010,28 @@ async function loadSessions({ quiet = false } = {}) {
 
 function activeSession() {
   return state.sessions.find((session) => session.id === state.activeId) || null;
+}
+
+// Chat mode is a per-session server flag.  `handoff` still belongs to chat
+// until the runner reports the final mode.
+function isChatSession(session) {
+  return Boolean(session && session.chat && session.chat.mode !== 'tui');
+}
+
+function showChatPane(session) {
+  const pane = $('#chat-pane');
+  const area = $('.terminal-area');
+  if (pane) pane.hidden = false;
+  if (area) area.hidden = true;
+  if (window.ChatView) ChatView.show(session);
+}
+
+function showTerminalPane() {
+  const pane = $('#chat-pane');
+  const area = $('.terminal-area');
+  if (pane) pane.hidden = true;
+  if (area) area.hidden = false;
+  if (window.ChatView) ChatView.hide();
 }
 
 /* Hidden sessions are omitted from the tile grid only; tabs still list them.
@@ -1040,6 +1178,10 @@ function renderTabs() {
     root.append(h('span', { class: 'tab-empty', text: 'No sessions connected' }));
   }
   for (const session of state.sessions) {
+    const chat = session.chat || null;
+    const chatMode = chat ? chat.mode !== 'tui' : false;
+    const chatPending = chat ? Number(chat.pending || 0) : 0;
+    const chatUnread = chat ? Number(chat.unread || 0) : 0;
     const tab = h('button', {
       class: `tab ${session.id === state.activeId ? 'is-active' : ''}`.trim(),
       role: 'tab',
@@ -1048,7 +1190,20 @@ function renderTabs() {
     },
       h('span', { class: `dot ${session.online ? 'online' : ''}`.trim() }),
       h('span', { class: 'tab-name', text: session.name }),
-      session.unread > 0 ? h('span', { class: 'tab-badge', text: String(session.unread), title: `${session.unread} unread message(s)` }) : null,
+      chat ? h('span', {
+        class: `tab-mode ${chatMode ? 'is-chat' : 'is-tty'}`,
+        text: chatMode ? 'chat' : 'tty',
+        title: chatMode ? 'Structured chat mode' : 'Terminal mode',
+      }) : null,
+      chatUnread > 0 && session.id !== state.activeId
+        ? h('span', { class: 'tab-chat-unread', title: `${chatUnread} unread chat event(s)` })
+        : null,
+      chatPending > 0
+        ? h('span', { class: 'tab-badge tab-pending', text: String(chatPending), title: `${chatPending} pending approval(s)` })
+        : null,
+      session.unread > 0
+        ? h('span', { class: 'tab-badge tab-mailbox', text: String(session.unread), title: `${session.unread} unread message(s)` })
+        : null,
     );
     root.append(tab);
   }
@@ -1064,6 +1219,30 @@ function activate(id, { quiet = false } = {}) {
   renderTabs();
   updateSubtitle();
   if (!quiet || changed) renderTopbar();
+
+  if (isChatSession(session)) {
+    if (state.layout === 'tile') {
+      state.layout = 'single';
+      safeStorageSet('opencloddie.layout', 'single');
+      applyLayoutChrome();
+      renderLayoutToggle();
+    }
+    $('#empty').hidden = true;
+    $('#session-overlay').hidden = true;
+    $('#hidden-overlay').hidden = true;
+    for (const entry of state.terminals.values()) entry.el.classList.add('hidden');
+    if (state.view === 'sessions') showChatPane(session);
+    $('#status-active').textContent = session.online
+      ? `${session.name} · chat · ${session.model || (session.chat && session.chat.model) || ''}`.replace(/\s+·\s+$/, '')
+      : `${session.name} · chat · offline · last seen ${session.last_seen || 'never'}`;
+    $('#status-hint').textContent = 'Enter send · Shift+Enter newline';
+    return;
+  }
+
+  showTerminalPane();
+  const area = $('.terminal-area');
+  if (area) area.hidden = false;
+  if (state.terminalHint) $('#status-hint').textContent = state.terminalHint;
 
   if (state.layout === 'tile') {
     $('#empty').hidden = true;
@@ -1384,7 +1563,8 @@ function connectTerminal(entry, session) {
   if (entry.disposed) return;
   entry.session = session;
   if (entry.retryTimer) { clearTimeout(entry.retryTimer); entry.retryTimer = null; }
-  if (!session.online) return;
+  // Structured chat sessions have no terminal pane behind them.
+  if (!session.online || isChatSession(session)) return;
   if (entry.ws && (entry.ws.readyState === WebSocket.OPEN || entry.ws.readyState === WebSocket.CONNECTING)) return;
 
   const generation = ++entry.generation;
@@ -1490,6 +1670,33 @@ function updateStatusline(entry, override) {
   $('#status-active').textContent = `${entry.session.name} · ${entry.session.hostname || 'host'} · ${entry.session.cwd || '—'} · ${entry.session.model || ''}`;
 }
 
+const CHAT_BUSY_STATUSES = new Set([
+  'thinking', 'working', 'running', 'streaming', 'tool', 'tool_use',
+  'compacting', 'retrying', 'busy', 'waiting', 'waiting_permission', 'starting',
+]);
+
+async function requestHandoff(session, mode) {
+  if (!session || !window.ChatView) return;
+  const toChat = mode === 'chat';
+  const busy = Boolean(session.chat && CHAT_BUSY_STATUSES.has(String(session.chat.status || '')));
+  const message = toChat
+    ? 'This restarts Claude in structured chat mode and resumes the same conversation. The terminal view closes.'
+    : `Switching to the terminal stops the current chat turn${busy ? ' — Claude is still working' : ''}. Continue?`;
+  const ok = await confirmDialog(
+    toChat ? 'Switch to chat?' : 'Switch to terminal?',
+    message,
+    { confirmLabel: toChat ? 'Switch to chat' : 'Switch to terminal', danger: !toChat },
+  );
+  if (!ok) return;
+  try {
+    await ChatView.handoff(session, mode);
+    toast(toChat ? 'Switching to chat…' : 'Switching to terminal…');
+    setTimeout(() => loadSessions({ quiet: true }), 400);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 async function killSession(session) {
   const ok = await confirmDialog(
     'Kill session?',
@@ -1501,6 +1708,7 @@ async function killSession(session) {
     await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
     toast(`Removed ${session.name}`);
     destroyTerminal(session.id);
+    if (window.ChatView) ChatView.destroy(session.id);
     state.sessions = state.sessions.filter((s) => s.id !== session.id);
     if (state.activeId === session.id) {
       state.activeId = state.sessions[0] ? state.sessions[0].id : null;
@@ -1978,7 +2186,7 @@ function bind() {
   window.addEventListener('orientationchange', syncViewportHeight);
   document.addEventListener('focusin', (event) => {
     if (!isCoarsePointer()) return;
-    if (!event.target || !event.target.closest || !event.target.closest('.xterm')) return;
+    if (!event.target || !event.target.closest || !event.target.closest('.xterm, .chat-input')) return;
     // The on-screen keyboard animates in after focus; re-measure once it has
     // settled so the terminal refits above it.
     setTimeout(syncViewportHeight, 250);
@@ -1998,6 +2206,38 @@ function bind() {
   });
   window.addEventListener('beforeunload', () => {
     for (const entry of state.terminals.values()) disconnectTerminal(entry);
+    if (window.ChatView) ChatView.hide();
+  });
+}
+
+if (window.ChatView) {
+  ChatView.init({
+    h,
+    clear,
+    api,
+    openModal,
+    confirmDialog,
+    toast,
+    copyText,
+    chatConfig() {
+      return (state.me && state.me.chat) || null;
+    },
+    onRead(sessionId) {
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (session && session.chat) session.chat.unread = 0;
+      renderTabs();
+      if (state.activeId === sessionId) renderTopbar();
+    },
+    onChatUpdate(sessionId, patch) {
+      const session = state.sessions.find((s) => s.id === sessionId);
+      if (!session) return;
+      session.chat = Object.assign({}, session.chat || {}, patch);
+      renderTabs();
+      if (state.activeId === sessionId) renderTopbar();
+    },
+    onModeChange() {
+      loadSessions({ quiet: true });
+    },
   });
 }
 

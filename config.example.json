@@ -82,6 +82,22 @@
     "max_unread_per_session": 500,
     "rate_limit_per_minute": 60
   },
+  "chat": {
+    "enabled": true,
+    "persist": true,
+    "retention_days": 30,
+    "max_events_per_session": 5000,
+    "max_event_bytes": 2097152,
+    "max_tool_result_bytes": 65536,
+    "max_input_text_bytes": 262144,
+    "max_image_bytes": 5242880,
+    "max_input_images": 4,
+    "max_inline_event_image_bytes": 1048576,
+    "permission_timeout_seconds": 300,
+    "auto_restart": true,
+    "store_tool_outputs": true,
+    "min_claude_version": "2.1.300"
+  },
   "database": {
     "path": "/data/opencloddie.db"
   }

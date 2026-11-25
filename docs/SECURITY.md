@@ -221,6 +221,22 @@ also means the rate limiter is per instance, not distributed.
   who can read the database (or the master secret's host).  They are
   same-account only and retained for `messages.retention_days` (default 30);
   do not send credentials through the mailbox.
+- Structured chat history is also plaintext SQLite: user messages, assistant
+  text, tool inputs (including shell commands and file paths), capped tool
+  output and approval decisions.  It is owner-only, retained for
+  `chat.retention_days` (default 30), can be disabled with `chat.persist=false`
+  (live streaming only) or deleted per session from the UI.  It is separate
+  from Claude's own transcript on the client host.  Treat the database as
+  sensitive; do not use chat for secrets you would not put in the mailbox.
+- Chat approvals are decisions about executing tools.  They are owner-only,
+  idempotent (first decision wins), and time out to a denial.  If the approval
+  MCP server cannot be loaded, chat mode refuses to start; it never silently
+  bypasses the permission prompt.
+- Chat images are validated (media type, decoded size, count) and stored inline
+  up to `chat.max_inline_event_image_bytes`; larger images become placeholders
+  in the transcript even though they were sent to Claude.  Search is owner-scoped
+  over stored payloads.  Rewind runs with the session owner's authority on the
+  agent host and restores files only; it never rewinds the conversation.
 
 ## Hardening checklist
 
