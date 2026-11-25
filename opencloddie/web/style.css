@@ -164,11 +164,16 @@ pre {
 .layout-btn.is-active { color: var(--accent); background: var(--panel-3); }
 .usage-bars {
   display: flex; flex-direction: column; gap: 3px; flex: none;
-  width: 56px; padding: 0 2px; cursor: default;
+  padding: 0 2px; cursor: default;
 }
+.usage-row { display: flex; align-items: center; gap: 6px; }
 .usage-bar {
-  display: block; height: 5px; border-radius: 999px;
+  display: block; flex: none; width: 56px; height: 5px; border-radius: 999px;
   background: var(--panel-3); overflow: hidden;
+}
+.usage-pct {
+  min-width: 30px; font-family: var(--mono); font-size: 10px;
+  line-height: 1; color: var(--muted); text-align: right;
 }
 .usage-fill {
   display: block; width: 0; height: 100%; border-radius: inherit;

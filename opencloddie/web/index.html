@@ -77,9 +77,18 @@
           <span id="view-subtitle" class="muted"></span>
         </div>
         <div class="usage-bars" id="usage-bars" hidden>
-          <span class="usage-bar" data-bucket="rolling" role="img"><span class="usage-fill"></span></span>
-          <span class="usage-bar" data-bucket="weekly" role="img"><span class="usage-fill"></span></span>
-          <span class="usage-bar" data-bucket="monthly" role="img"><span class="usage-fill"></span></span>
+          <span class="usage-row">
+            <span class="usage-bar" data-bucket="rolling" role="img"><span class="usage-fill"></span></span>
+            <span class="usage-pct" data-pct="rolling"></span>
+          </span>
+          <span class="usage-row">
+            <span class="usage-bar" data-bucket="weekly" role="img"><span class="usage-fill"></span></span>
+            <span class="usage-pct" data-pct="weekly"></span>
+          </span>
+          <span class="usage-row">
+            <span class="usage-bar" data-bucket="monthly" role="img"><span class="usage-fill"></span></span>
+            <span class="usage-pct" data-pct="monthly"></span>
+          </span>
         </div>
         <div class="layout-toggle" id="layout-toggle" role="group" aria-label="Terminal layout">
           <button class="layout-btn is-active" id="layout-single" type="button" title="Single session" aria-label="Single session" aria-pressed="true">

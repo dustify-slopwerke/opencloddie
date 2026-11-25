@@ -554,7 +554,9 @@ function renderUsage() {
     bar.classList.toggle('is-warn', pct !== null && pct >= 80);
     bar.classList.toggle('is-danger', pct !== null && pct >= 95);
     bar.firstElementChild.style.width = pct === null ? '0%' : `${pct}%`;
-    const used = pct === null ? 'usage unavailable' : `${Math.round(pct)}% used`;
+    const pctEl = bar.parentElement.querySelector('.usage-pct');
+    if (pctEl) pctEl.textContent = pct === null ? '—' : `${pct.toFixed(1)}%`;
+    const used = pct === null ? 'usage unavailable' : `${pct.toFixed(1)}% used`;
     const reset = usageReset(item.resets_at);
     const text = `${label} quota: ${used}${reset ? ` · resets ${reset}` : ''}`;
     bar.setAttribute('aria-label', text);
