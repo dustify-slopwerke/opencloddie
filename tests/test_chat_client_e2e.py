@@ -229,7 +229,12 @@ class ChatClientEndToEndTest(unittest.TestCase):
         session = self._wait_session()
         self.assertTrue(session["online"])
         self.assertEqual(session["chat"]["mode"], "chat", session["chat"])
-        self.assertTrue(wait_for(lambda: self._chat_state(), timeout=20))
+        # The runner registers its socket asynchronously; sending before it is
+        # idle can lose the first turn on a slow CI runner.
+        self.assertTrue(
+            wait_for(lambda: self._chat_status() in ("idle", "thinking"), timeout=30),
+            f"chat runner not ready (status={self._chat_status()})",
+        )
 
         ws = self._connect_chat()
         try:
