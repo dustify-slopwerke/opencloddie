@@ -362,7 +362,9 @@ class AgentHub:
             # Let the agent kill its tmux session and close the socket itself;
             # closing immediately can race with delivery of the kill message.
             conn.send_json({"t": "kill"})
-            timer = threading.Timer(5.0, conn.close, kwargs={"reason": "kill timeout"})
+            # Give a loaded agent time to read the kill frame before the
+            # socket is closed; 5s was racing on slow CI runners.
+            timer = threading.Timer(15.0, conn.close, kwargs={"reason": "kill timeout"})
             timer.daemon = True
             timer.start()
             return True

@@ -196,7 +196,12 @@ class AgentEndToEndTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         # Kill propagation is asynchronous; short waits were flaky under load.
-        self.assertTrue(wait_for(lambda: not tmux_has(self.tmux_name), timeout=30))
+        gone = wait_for(lambda: not tmux_has(self.tmux_name), timeout=30)
+        self.assertTrue(
+            gone,
+            "tmux survived the API kill; agent "
+            f"poll={self.agent.poll()}; log:\n{self._log_tail()}",
+        )
         self.assertTrue(wait_for(lambda: self.agent.poll() is not None, timeout=30))
 
 
