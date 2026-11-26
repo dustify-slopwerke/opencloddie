@@ -37,6 +37,10 @@
     notifyTimer: null,
     tickTimer: null,
     lastSeq: 0,
+    oldestSeq: 0,
+    hasOlder: false,
+    loadingOlder: false,
+    replaying: false,
     lastMarkedRead: 0,
     streaming: false,
     pinned: true,
@@ -207,6 +211,9 @@
     state.session = null;
     state.chat = null;
     state.lastSeq = 0;
+    state.oldestSeq = 0;
+    state.hasOlder = false;
+    state.loadingOlder = false;
     state.lastMarkedRead = 0;
     state.optimistic = [];
     state.loading = false;
@@ -333,6 +340,9 @@
     state.lastUser = null;
     state.seqEls.clear();
     state.lastSeq = 0;
+    state.oldestSeq = 0;
+    state.hasOlder = false;
+    state.loadingOlder = false;
     state.lastMarkedRead = 0;
     state.streaming = false;
     state.pinned = true;
@@ -345,13 +355,51 @@
     tl.append(row);
   }
 
+  // /clear in Claude Code starts a new conversation.  The server keeps the
+  // old events stored but stops returning them; mirror that in the live view
+  // without resetting lastSeq (the boundary itself is the newest seq we know).
+  function handleConversationReset() {
+    for (const card of state.permissionCards.values()) {
+      try { card.dispose(); } catch (_) { /* ignore */ }
+    }
+    state.permissionCards.clear();
+    state.pending.clear();
+    state.groups.clear();
+    state.streams.clear();
+    state.toolCards.clear();
+    state.runningTools.clear();
+    state.nestedContainers.clear();
+    state.applied.clear();
+    state.appliedIds.clear();
+    state.optimistic = [];
+    state.checkpoints.clear();
+    state.lastUser = null;
+    state.seqEls.clear();
+    state.streaming = false;
+    state.pinned = true;
+    state.loaded = true;
+    state.oldestSeq = 0;
+    state.hasOlder = false;
+    state.loadingOlder = false;
+    if (state.chat) state.chat.pending_count = 0;
+    const tl = timeline();
+    if (tl) {
+      state.deps.clear(tl);
+      tl.append(window.ChatRender.emptyState(emptyMessage()));
+    }
+    syncCheckpointActions();
+    renderHeader();
+    syncComposer();
+    scrollToBottom(true);
+  }
+
   async function loadSnapshot(session) {
     if (!session || !session.id) return;
     state.loading = true;
     syncComposer();
     let data;
     try {
-      data = await state.deps.api(`/api/sessions/${encodeURIComponent(session.id)}/chat?limit=200`);
+      data = await state.deps.api(`/api/sessions/${encodeURIComponent(session.id)}/chat?limit=500`);
     } catch (error) {
       if (state.sessionId !== session.id) return;
       state.loading = false;
@@ -375,9 +423,13 @@
     state.loading = false;
     state.loaded = true;
     setChat(data.chat);
-    for (const event of Array.isArray(data.events) ? data.events : []) applyEvent(event);
+    const events = Array.isArray(data.events) ? data.events : [];
+    for (const event of events) applyEvent(event);
     for (const permission of Array.isArray(data.pending) ? data.pending : []) addPermission(permission);
     state.lastSeq = Math.max(state.lastSeq, Number(data.last_seq) || 0);
+    state.oldestSeq = oldestEventSeq(events);
+    state.hasOlder = Boolean(data.has_more) && state.oldestSeq > 0;
+    updateOlderControl();
     finalizeSnapshot();
     renderHeader();
     syncComposer();
@@ -405,6 +457,104 @@
     if (mode === 'tui') return 'This session is in terminal mode. Switch to chat to send messages.';
     if (state.session && !state.session.online) return 'No chat history yet. Start the session on its host to chat.';
     return 'No messages yet. Send a message below to start.';
+  }
+
+  /* ------------------------------------------------------------- history */
+  function oldestEventSeq(events) {
+    let oldest = 0;
+    for (const event of events) {
+      const seq = Number(event && event.seq) || 0;
+      if (seq && (!oldest || seq < oldest)) oldest = seq;
+    }
+    return oldest;
+  }
+
+  function updateOlderControl() {
+    const tl = timeline();
+    if (!tl) return;
+    let row = tl.querySelector('.chat-older');
+    if (!state.hasOlder) {
+      if (row) row.remove();
+      return;
+    }
+    if (row) return;
+    const button = state.deps.h('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      text: 'Load earlier messages',
+    });
+    button.addEventListener('click', () => { loadOlder(); });
+    row = state.deps.h('div', { class: 'chat-older' }, button);
+    tl.insertBefore(row, tl.firstChild);
+  }
+
+  // Events are loaded newest-first in pages.  The API pages backwards with
+  // before_seq, so replay a page into the (temporarily) live timeline and then
+  // move the nodes it produced above the previously oldest one.
+  async function loadOlder() {
+    if (!state.sessionId || !state.hasOlder || state.loadingOlder) return;
+    const sessionId = state.sessionId;
+    const before = state.oldestSeq;
+    const tl = timeline();
+    if (!before || !tl) return;
+    state.loadingOlder = true;
+    try {
+      const data = await state.deps.api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/chat?before_seq=${before}&limit=500`
+      );
+      if (state.sessionId !== sessionId || state.oldestSeq !== before) return;
+      // Measure after the await so live output that arrived meanwhile is not
+      // mistaken for the prepended page.
+      const previousHeight = tl.scrollHeight;
+      const previousTop = tl.scrollTop;
+      const events = Array.isArray(data.events) ? data.events : [];
+      const control = tl.querySelector('.chat-older');
+      let anchor = control ? control.nextSibling : tl.firstChild;
+      if (anchor && anchor.classList
+        && (anchor.classList.contains('chat-empty') || anchor.classList.contains('chat-loading'))) {
+        anchor = null;
+      }
+      const existing = new Set(tl.childNodes);
+      const lastUser = state.lastUser;
+      const liveTools = new Set(state.runningTools);
+      state.replaying = true;
+      try {
+        for (const event of events) applyEvent(event, { historical: true });
+      } finally {
+        state.replaying = false;
+      }
+      state.lastUser = lastUser;
+      // Historical tools without a result in this page are not still running.
+      for (const id of Array.from(state.runningTools)) {
+        if (liveTools.has(id)) continue;
+        const card = state.toolCards.get(id);
+        if (card && typeof card.setStatus === 'function') card.setStatus('done', 'ok');
+        state.runningTools.delete(id);
+      }
+      if (anchor && anchor.parentNode === tl) {
+        for (const node of Array.from(tl.childNodes)) {
+          if (!existing.has(node)) tl.insertBefore(node, anchor);
+        }
+      }
+      const oldest = oldestEventSeq(events);
+      if (oldest && oldest < before) {
+        state.oldestSeq = oldest;
+        state.hasOlder = Boolean(data.has_more);
+      } else {
+        state.hasOlder = false;
+      }
+      updateOlderControl();
+      tl.scrollTop = previousTop + (tl.scrollHeight - previousHeight);
+    } catch (error) {
+      if (state.deps.toast) {
+        state.deps.toast(
+          error && error.message ? error.message : 'Could not load earlier messages',
+          'error',
+        );
+      }
+    } finally {
+      state.loadingOlder = false;
+    }
   }
 
   /* ------------------------------------------------------------ websocket */
@@ -533,9 +683,15 @@
         state.session.chat = Object.assign({}, state.session.chat || {}, frame.session.chat);
       }
     }
-    for (const event of Array.isArray(frame.events) ? frame.events : []) applyEvent(event);
+    const events = Array.isArray(frame.events) ? frame.events : [];
+    for (const event of events) applyEvent(event);
     for (const permission of Array.isArray(frame.pending) ? frame.pending : []) addPermission(permission);
     state.lastSeq = Math.max(state.lastSeq, Number(frame.last_seq) || 0);
+    if (events.length && !state.oldestSeq) {
+      state.oldestSeq = oldestEventSeq(events);
+      state.hasOlder = Boolean(frame.has_more) && state.oldestSeq > 0;
+      updateOlderControl();
+    }
     finalizeSnapshot();
     renderHeader();
     syncComposer();
@@ -586,8 +742,9 @@
   }
 
   /* --------------------------------------------------------------- events */
-  function applyEvent(event) {
+  function applyEvent(event, opts) {
     if (!event || typeof event !== 'object') return;
+    const historical = Boolean(opts && opts.historical);
     const seq = Number(event.seq) || 0;
     if (seq) {
       if (state.applied.has(seq)) return;
@@ -606,17 +763,17 @@
     removeEmpty();
     const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
     switch (event.kind) {
-      case 'user_message': handleUserMessage(payload); break;
+      case 'user_message': handleUserMessage(payload, historical); break;
       case 'assistant_block': handleAssistantBlock(payload); break;
       case 'message_start':
-        if (payload.model) {
+        if (!historical && payload.model) {
           state.chat = Object.assign({}, state.chat || {}, { model: String(payload.model) });
           renderHeader();
         }
         break;
       case 'message_stop': handleMessageStop(payload); break;
-      case 'tool_result': handleToolResult(payload); break;
-      case 'result': handleResult(payload); break;
+      case 'tool_result': handleToolResult(payload, historical); break;
+      case 'result': handleResult(payload, historical); break;
       case 'error': appendTimeline(window.ChatRender.errorRow(payload)); break;
       case 'status':
         if (payload.status && payload.status !== 'idle') {
@@ -629,15 +786,20 @@
         appendTimeline(window.ChatRender.statusRow(String(text), { kind: 'status' }));
         break;
       }
+      case 'conversation_reset':
+        if (!historical) handleConversationReset();
+        break;
       case 'compact_boundary':
         appendTimeline(window.ChatRender.statusRow('Conversation compacted', { kind: 'status' }));
         break;
       case 'prompt_suggestion':
-        setSuggestion(payload && payload.suggestion);
+        if (!historical) setSuggestion(payload && payload.suggestion);
         break;
-      case 'permission': addPermission(payload); break;
+      case 'permission':
+        if (!historical) addPermission(payload);
+        break;
       case 'permission_resolved':
-        resolvePermission(payload.permission_id || payload.id, payload.status, payload.decision);
+        if (!historical) resolvePermission(payload.permission_id || payload.id, payload.status, payload.decision);
         break;
       case 'handoff':
         appendTimeline(window.ChatRender.statusRow(
@@ -646,7 +808,7 @@
         ));
         break;
       case 'system_init':
-        if (payload.model || payload.permission_mode) {
+        if (!historical && (payload.model || payload.permission_mode)) {
           state.chat = Object.assign({}, state.chat || {}, {
             model: payload.model ? String(payload.model) : (state.chat && state.chat.model),
             permission_mode: payload.permission_mode ? String(payload.permission_mode) : (state.chat && state.chat.permission_mode),
@@ -668,10 +830,10 @@
     scrollIfPinned();
   }
 
-  function handleUserMessage(payload) {
+  function handleUserMessage(payload, historical) {
     const content = payload.content;
     const text = window.ChatRender.contentText(content);
-    const optimistic = takeOptimistic(text);
+    const optimistic = historical ? null : takeOptimistic(text);
     let el = optimistic && optimistic.el ? optimistic.el : null;
     if (!el) {
       el = window.ChatRender.userBubble(content);
@@ -737,14 +899,14 @@
     }
   }
 
-  function handleToolResult(payload) {
+  function handleToolResult(payload, historical) {
     const id = String(payload.tool_use_id || payload.id || '');
     const card = id ? state.toolCards.get(id) : null;
-    state.streaming = false;
     if (id) state.runningTools.delete(id);
+    if (!historical) state.streaming = false;
     if (card) card.setResult(payload);
     else appendTimeline(window.ChatRender.orphanToolResult(payload));
-    scheduleComposerSync();
+    if (!historical) scheduleComposerSync();
   }
 
   function finishRunningTools() {
@@ -755,7 +917,15 @@
     }
   }
 
-  function handleResult(payload) {
+  function handleResult(payload, historical) {
+    if (historical) {
+      // Replayed history must not reset the live turn's status, cost or
+      // running tools; only the row itself belongs in the transcript.
+      if (payload.local_command !== 'clear') {
+        appendTimeline(window.ChatRender.resultRow(payload));
+      }
+      return;
+    }
     state.streaming = false;
     finishRunningTools();
     state.chat = Object.assign({}, state.chat || {}, { status: 'idle' });
@@ -765,7 +935,10 @@
       if (payload.usage.input_tokens != null) state.chat.tokens_in = Number(payload.usage.input_tokens) || 0;
       if (payload.usage.output_tokens != null) state.chat.tokens_out = Number(payload.usage.output_tokens) || 0;
     }
-    appendTimeline(window.ChatRender.resultRow(payload));
+    // /clear starts a new conversation; a "Turn complete" row would be noise.
+    if (payload.local_command !== 'clear') {
+      appendTimeline(window.ChatRender.resultRow(payload));
+    }
     renderHeader();
     syncComposer();
     scheduleNotify();
@@ -1265,12 +1438,12 @@
 
   /* --------------------------------------------------------------- scroll */
   function scrollIfPinned() {
-    if (!state.pinned || state.scrollScheduled) return;
+    if (state.replaying || !state.pinned || state.scrollScheduled) return;
     state.scrollScheduled = true;
     const run = () => {
       state.scrollScheduled = false;
       const tl = timeline();
-      if (tl && state.pinned) tl.scrollTop = tl.scrollHeight;
+      if (tl && state.pinned && !state.replaying) tl.scrollTop = tl.scrollHeight;
     };
     if (window.requestAnimationFrame) window.requestAnimationFrame(run);
     else setTimeout(run, 16);
@@ -2082,7 +2255,15 @@
     const stop = node('chat-stop');
     if (stop) stop.addEventListener('click', stopTurn);
     const tl = timeline();
-    if (tl) tl.addEventListener('scroll', () => { state.pinned = isNearBottom(); }, { passive: true });
+    if (tl) {
+      tl.addEventListener('scroll', () => {
+        state.pinned = isNearBottom();
+        // Pull older pages as the reader approaches the top.
+        if (tl.scrollTop < 120 && state.hasOlder && !state.loadingOlder && !state.loading) {
+          loadOlder();
+        }
+      }, { passive: true });
+    }
     window.addEventListener('resize', () => {
       if (state.search.open) positionSearchPanel();
     }, { passive: true });

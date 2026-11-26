@@ -202,6 +202,50 @@ def main(argv=None):
                 continue
             text = _content_text(message)
 
+        command = text.strip().split(" ", 1)[0] if text.strip() else ""
+        if command in ("/clear", "/reset", "/new"):
+            # Mirror the real CLI: /clear starts a new session with empty
+            # context and reports the reset in the stream.
+            previous = session_id
+            session_id = str(uuid.uuid4())
+            emit(
+                {
+                    "type": "conversation_reset",
+                    "new_conversation_id": session_id,
+                    "uuid": session_id,
+                    "trigger": "clear",
+                    "user_message_uuid": str(uuid.uuid4()),
+                    "session_id": previous,
+                }
+            )
+            emit(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": session_id,
+                    "model": args.model,
+                    "tools": [],
+                    "mcp_servers": [],
+                    "permissionMode": args.permission_mode,
+                    "capabilities": {"interrupt_receipt_v1": True},
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "",
+                    "session_id": session_id,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "total_cost_usd": 0.0,
+                    "permission_denials": [],
+                    "terminal_reason": None,
+                    "local_command": "clear",
+                }
+            )
+            continue
+
         if (
             message is not None
             and not permission_done

@@ -155,7 +155,7 @@ REST (web listener, `Remote-User`, owner-only; mutations need
 
 | Method + path | Purpose |
 | --- | --- |
-| `GET /api/sessions/<id>/chat?limit=200&after_seq=N` | State, pending permissions, events (ascending). |
+| `GET /api/sessions/<id>/chat?limit=200&after_seq=N&before_seq=N` | State, pending permissions, events (ascending).  `before_seq` pages backwards through stored history; `has_more` reports whether an older visible event remains. |
 | `POST /api/sessions/<id>/chat/input` | `{content, client_msg_id}` |
 | `POST /api/sessions/<id>/chat/interrupt` | Stop the current turn. |
 | `POST /api/sessions/<id>/chat/mode` | `{mode:"chat"\|"tui", force}` |
@@ -209,6 +209,7 @@ Stored in `chat_events(kind, payload)`; `event_id` dedupes replay.
 | `permission_resolved` | `{permission_id, status, decision}` |
 | `error` | `{message, retryable}` |
 | `handoff` | `{from, to, message}` |
+| `conversation_reset` | `{trigger, conversation_id, session_id}` — `/clear` boundary; events at or before it are hidden from reads |
 | `checkpoint` | `{uuid, label}` |
 | `rate_limit` | the CLI rate-limit info object |
 | `compact_boundary` | `{trigger, pre_tokens}` |

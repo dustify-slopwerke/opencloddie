@@ -209,6 +209,42 @@ class ChatWebTest(unittest.TestCase):
         self.assertFalse(data["has_more"])
         self.assertEqual(data["events"][0]["seq"], seq)
 
+    def test_chat_get_pages_backwards_with_before_seq(self):
+        seqs = []
+        for index in range(5):
+            seq, _ = self.db.append_chat_event(
+                self.sid,
+                self.uid,
+                f"e{index}",
+                "assistant_block",
+                {"text": f"turn {index}"},
+            )
+            seqs.append(seq)
+
+        status, _, page = self.web_json(
+            "GET", f"/api/sessions/{self.sid}/chat?limit=2"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([e["event_id"] for e in page["events"]], ["e3", "e4"])
+        self.assertTrue(page["has_more"])
+
+        status, _, older = self.web_json(
+            "GET",
+            f"/api/sessions/{self.sid}/chat?limit=2&before_seq={page['events'][0]['seq']}",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([e["event_id"] for e in older["events"]], ["e1", "e2"])
+        self.assertTrue(older["has_more"])
+
+        status, _, oldest = self.web_json(
+            "GET",
+            f"/api/sessions/{self.sid}/chat?limit=2&before_seq={older['events'][0]['seq']}",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([e["event_id"] for e in oldest["events"]], ["e0"])
+        self.assertFalse(oldest["has_more"])
+        self.assertEqual(oldest["events"][0]["seq"], seqs[0])
+
     # ------------------------------------------------------------------ CSRF
     def test_mutations_require_csrf_header_and_same_origin(self):
         status, _, data = self.web_json(

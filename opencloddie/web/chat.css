@@ -152,6 +152,8 @@
 }
 .chat-loading { color: var(--dim); }
 .chat-loading .chat-status-dot { background: var(--warn); animation: chat-pulse 1s ease-in-out infinite; }
+.chat-older { display: flex; justify-content: center; padding: 2px 0 4px; }
+.chat-older .btn { font-size: 11.5px; color: var(--dim); }
 
 /* -------------------------------------------------------------- messages */
 .chat-msg { display: flex; min-width: 0; max-width: 100%; }

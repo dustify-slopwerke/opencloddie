@@ -277,6 +277,51 @@ class ChatClientEndToEndTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: not tmux_has(self.tmux_name or ""), timeout=10))
 
 
+    def test_clear_starts_new_web_transcript(self) -> None:
+        started = self.client("run", "--chat", "-n", self.name, "-C", self.work, "--no-attach")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        session = self._wait_session()
+        self.assertTrue(session["online"])
+        self.assertTrue(
+            wait_for(lambda: self._chat_status() in ("idle", "thinking"), timeout=30),
+            f"chat runner not ready (status={self._chat_status()})",
+        )
+
+        ws = self._connect_chat()
+        try:
+            self._send_and_read(ws, "hello chat", "c1")
+            ws.send_text(
+                json.dumps({"t": "input", "client_msg_id": "c2", "content": "/clear"})
+            )
+            reset = self._read_event_of_kind(ws, "conversation_reset", timeout=20)
+            self.assertIsNotNone(reset, "runner did not emit conversation_reset")
+            # Consume the /clear turn's result so the next helper cannot stop
+            # on it before the following turn's assistant block arrives.
+            self.assertIsNotNone(
+                self._read_event_of_kind(ws, "result", timeout=20),
+                "no result for /clear",
+            )
+            self._send_and_read(ws, "after clear", "c3")
+        finally:
+            ws.close()
+
+        state = self._chat_state()
+        assert state is not None
+        kinds = {event["kind"] for event in state["events"]}
+        visible = json.dumps([event["payload"] for event in state["events"]])
+        # The new conversation is visible; the old turn and the boundary
+        # marker are not, but the raw log keeps everything.
+        self.assertIn("after clear", visible)
+        self.assertNotIn("hello chat", visible)
+        self.assertNotIn("conversation_reset", kinds)
+        self.assertGreater(
+            self.server.app.db.chat_event_count(self.session_id),
+            len(state["events"]),
+        )
+
+        stopped = self.client("stop", self.name)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+
     def test_rewind_round_trip(self) -> None:
         started = self.client("run", "--chat", "-n", self.name, "-C", self.work, "--no-attach")
         self.assertEqual(started.returncode, 0, started.stderr)

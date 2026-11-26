@@ -803,7 +803,9 @@ class Handler(BaseHTTPRequestHandler):
                         "last_seq": state["last_seq"],
                         "has_more": bool(
                             events
-                            and app.db.chat_event_count(session_id) > len(events)
+                            and app.db.chat_events_exist_before(
+                                session_id, int(events[0]["seq"])
+                            )
                         ),
                     },
                 )
@@ -1307,6 +1309,12 @@ class Handler(BaseHTTPRequestHandler):
                             for row in self.app.db.chat_checkpoints(session_id)
                         ],
                         "last_seq": state["last_seq"],
+                        "has_more": bool(
+                            snap["events"]
+                            and self.app.db.chat_events_exist_before(
+                                session_id, int(snap["events"][0]["seq"])
+                            )
+                        ),
                     }
                 )
             )

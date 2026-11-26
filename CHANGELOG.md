@@ -4,6 +4,23 @@ All notable changes to opencloddie are documented here.  The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Web chat `/clear` now starts a new conversation like Claude Code: the runner
+  records the CLI's conversation reset as a durable boundary, the server hides
+  (but retains) earlier events from reads, search, pagination, checkpoints and
+  unread counts, and the open timeline clears as soon as the boundary arrives.
+  The previous transcript stays stored; **Clear history** still deletes it.
+- Web chat no longer loses history on reload.  It used to load only the newest
+  200 events and had no way to request older ones, so a refresh after a
+  tool-heavy stretch dropped earlier turns (the data was never gone).  The
+  initial page is now 500 events, a "Load earlier messages" control and
+  near-top auto-load page backwards with `before_seq`, and replayed pages do
+  not disturb the live turn's status, tools or scroll position.  `has_more`
+  now reports whether an older visible event exists.
+
 ## [0.6.2] - 2026-11-26
 
 ### Fixed

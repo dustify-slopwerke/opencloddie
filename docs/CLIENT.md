@@ -155,7 +155,11 @@ a mode; use **Always allow** on an approval card to persist a rule in
 
 The composer accepts pasted/dropped images (PNG/JPEG/GIF/WebP, size and count
 caps in the `chat` config); they are sent to Claude as Anthropic image content
-blocks.  Chat history can be searched from the header.  Each user turn records
+blocks.  `/clear` behaves as it does in the TUI: Claude drops its context and
+the web conversation starts empty.  opencloddie records the reset boundary and
+stops returning, searching or paginating earlier events, but keeps them stored;
+**Clear history** is what deletes them permanently.  Chat history can be
+searched from the header.  Each user turn records
 a file checkpoint from the replayed message UUID; "Restore files to here" runs
 `claude --resume <uuid> --rewind-files <checkpoint>` after pausing the runner,
 then resumes the chat.  It restores files, not the conversation.

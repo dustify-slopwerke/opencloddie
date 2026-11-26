@@ -3534,6 +3534,7 @@ class ChatRunner:
         self._message_stop_reason = ""
         self._message_usage: dict = {}
         self._interrupt_error_emitted = False
+        self._reset_emitted = False
 
         self.stop_event = threading.Event()
         self.signal_reason = ""
@@ -4503,6 +4504,7 @@ class ChatRunner:
         self.turn_checkpointed = False
         self.turn_aborted = False
         self._interrupt_error_emitted = False
+        self._reset_emitted = False
         self._emit(
             "user_message",
             {
@@ -4793,6 +4795,9 @@ class ChatRunner:
                 info if isinstance(info, dict) else {"raw": str(info)},
             )
             return
+        if kind == "conversation_reset":
+            self._on_conversation_reset(obj)
+            return
         if kind == "prompt_suggestion":
             suggestion = (
                 obj.get("suggestion")
@@ -4826,6 +4831,25 @@ class ChatRunner:
             self._send_agent({"t": "error", "message": text, "retryable": False})
             self._set_status("error")
             return
+
+    def _on_conversation_reset(self, obj: dict) -> None:
+        """Record the CLI's /clear boundary as a durable event.
+
+        The hub hides everything before the newest ``conversation_reset`` so
+        the web transcript starts a new, empty conversation while the old
+        events stay stored (like the CLI's own /resume history).
+        """
+        if self._reset_emitted:
+            return
+        self._reset_emitted = True
+        self._emit(
+            "conversation_reset",
+            {
+                "trigger": str(obj.get("trigger") or ""),
+                "conversation_id": str(obj.get("new_conversation_id") or ""),
+                "session_id": str(obj.get("session_id") or ""),
+            },
+        )
 
     def _on_system_init(self, obj: dict) -> None:
         session_id = str(obj.get("session_id") or "")
@@ -5045,6 +5069,17 @@ class ChatRunner:
 
     def _on_result(self, obj: dict) -> None:
         self._flush_deltas(force=True)
+        if str(obj.get("local_command") or "") == "clear":
+            # Versions that do not emit conversation_reset still report the
+            # local command here; emit the boundary before the result so the
+            # result itself belongs to the new conversation.
+            self._on_conversation_reset(
+                {
+                    "trigger": "clear",
+                    "new_conversation_id": obj.get("session_id") or "",
+                    "session_id": obj.get("session_id") or "",
+                }
+            )
         payload = {
             "subtype": obj.get("subtype") or "",
             "is_error": bool(obj.get("is_error")),
@@ -5054,6 +5089,7 @@ class ChatRunner:
             "total_cost_usd": obj.get("total_cost_usd"),
             "permission_denials": obj.get("permission_denials") or [],
             "terminal_reason": obj.get("terminal_reason"),
+            "local_command": str(obj.get("local_command") or ""),
         }
         self._emit("result", payload)
         session_id = str(obj.get("session_id") or "")

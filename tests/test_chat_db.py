@@ -160,6 +160,9 @@ class ChatDatabaseTest(unittest.TestCase):
         self.assertEqual([r["event_id"] for r in after], ["e2"])
         self.assertEqual(self.db.chat_events_after(self.sid, seq2), [])
 
+        self.assertFalse(self.db.chat_events_exist_before(self.sid, seq1))
+        self.assertTrue(self.db.chat_events_exist_before(self.sid, seq2))
+
         self.assertEqual(
             [r["event_id"] for r in self.db.latest_chat_events(self.sid, 1)],
             ["e2"],
@@ -214,6 +217,53 @@ class ChatDatabaseTest(unittest.TestCase):
         self.db.chat_read_set(self.bob["id"], self.sid, seq1)
         self.assertEqual(self.db.chat_unread(self.bob["id"], self.sid), 2)
         self.assertEqual(self.db.chat_unread(self.uid, self.sid), 0)
+
+    # ------------------------------------------------------- conversation reset
+    def test_conversation_reset_hides_earlier_events(self):
+        first, _ = self._append("e1", "user_message", {"content": "old hello"})
+        reply, _ = self._append("e2", "assistant_block", {"text": "old hello"})
+        self._create_permission("p1")
+        self.db.chat_checkpoint_add(self.sid, "cp-old", reply)
+        boundary, _ = self._append(
+            "e3", "conversation_reset", {"trigger": "clear"}
+        )
+        fresh, _ = self._append("e4", "user_message", {"content": "new hello"})
+
+        self.assertEqual(self.db.chat_conversation_start(self.sid), boundary)
+        self.assertEqual(
+            [r["event_id"] for r in self.db.chat_events_after(self.sid)], ["e4"]
+        )
+        self.assertEqual(
+            [r["event_id"] for r in self.db.chat_events_after(self.sid, first)],
+            ["e4"],
+        )
+        self.assertEqual(
+            [r["event_id"] for r in self.db.latest_chat_events(self.sid, 10)],
+            ["e4"],
+        )
+        self.assertEqual(self.db.chat_events_before(self.sid, fresh), [])
+        self.assertFalse(self.db.chat_events_exist_before(self.sid, boundary))
+        self.assertFalse(self.db.chat_events_exist_before(self.sid, fresh))
+        self.assertEqual(self.db.search_chat_events(self.sid, "old", 10), ([], False))
+        self.assertEqual(self.db.chat_checkpoints(self.sid), [])
+        self.assertEqual(self.db.chat_unread(self.uid, self.sid), 0)
+
+        # Housekeeping still sees (and can trim) the full stored history.
+        self.assertEqual(self.db.chat_event_count(self.sid), 4)
+        self.assertEqual(self.db.chat_event_count(self.sid, boundary), 1)
+
+        # A later reset moves the boundary again.
+        self._append("e5", "conversation_reset", {"trigger": "clear"})
+        self._append("e6", "user_message", {"content": "newest"})
+        self.assertEqual(
+            [r["event_id"] for r in self.db.chat_events_after(self.sid)],
+            ["e6"],
+        )
+
+        # Deleting history drops the boundary along with everything else.
+        self.db.delete_chat_history(self.sid)
+        self.assertEqual(self.db.chat_conversation_start(self.sid), 0)
+        self.assertEqual(self.db.chat_events_after(self.sid), [])
 
     # ----------------------------------------------------------- permissions
     def test_permission_lifecycle_pending_count_and_expiry(self):

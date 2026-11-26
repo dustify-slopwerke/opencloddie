@@ -769,36 +769,64 @@ class Database:
             )
         return seq, True
 
+    def chat_conversation_start(self, session_id: str) -> int:
+        """Seq of the newest /clear boundary (0 when the session never cleared).
+
+        Everything at or before it belongs to a previous conversation and is
+        hidden from reads, search and pagination while remaining stored.
+        """
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM chat_events "
+                "WHERE session_id=? AND kind='conversation_reset'",
+                (session_id,),
+            ).fetchone()
+        return int((row[0] if row else 0) or 0)
+
     def chat_events_after(
         self, session_id: str, after_seq: int = 0, limit: int = 500
     ) -> list[dict[str, Any]]:
+        after_seq = max(int(after_seq), self.chat_conversation_start(session_id))
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM chat_events WHERE session_id=? AND seq>? "
                 "ORDER BY seq ASC LIMIT ?",
-                (session_id, int(after_seq), min(2000, max(1, int(limit)))),
+                (session_id, after_seq, min(2000, max(1, int(limit)))),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def chat_events_before(
         self, session_id: str, before_seq: int, limit: int = 200
     ) -> list[dict[str, Any]]:
+        start = self.chat_conversation_start(session_id)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM chat_events WHERE session_id=? AND seq<? "
+                "SELECT * FROM chat_events WHERE session_id=? AND seq>? AND seq<? "
                 "ORDER BY seq DESC LIMIT ?",
-                (session_id, int(before_seq), min(2000, max(1, int(limit)))),
+                (session_id, start, int(before_seq), min(2000, max(1, int(limit)))),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def chat_events_exist_before(self, session_id: str, before_seq: int) -> bool:
+        """True when a visible event older than ``before_seq`` still exists."""
+        start = self.chat_conversation_start(session_id)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM chat_events WHERE session_id=? AND seq>? AND seq<? "
+                "LIMIT 1",
+                (session_id, start, int(before_seq)),
+            ).fetchone()
+        return row is not None
 
     def latest_chat_events(
         self, session_id: str, limit: int = 200
     ) -> list[dict[str, Any]]:
+        start = self.chat_conversation_start(session_id)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM chat_events WHERE session_id=? "
+                "SELECT * FROM chat_events WHERE session_id=? AND seq>? "
                 "ORDER BY seq DESC LIMIT ?",
-                (session_id, min(2000, max(1, int(limit)))),
+                (session_id, start, min(2000, max(1, int(limit)))),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -814,10 +842,17 @@ class Database:
             )
         return cur.rowcount
 
-    def chat_event_count(self, session_id: str) -> int:
+    def chat_event_count(self, session_id: str, since_seq: int = 0) -> int:
+        """Count events, optionally only those after ``since_seq``.
+
+        Housekeeping (trimming) omits it and sees the whole stored history;
+        API ``has_more`` passes the /clear boundary to count only the visible
+        conversation.
+        """
         with self.lock:
             row = self.conn.execute(
-                "SELECT COUNT(*) FROM chat_events WHERE session_id=?", (session_id,)
+                "SELECT COUNT(*) FROM chat_events WHERE session_id=? AND seq>?",
+                (session_id, int(since_seq or 0)),
             ).fetchone()
         return int(row[0])
 
@@ -837,11 +872,12 @@ class Database:
             .replace("%", "\\%")
             .replace("_", "\\_")
         )
+        start = self.chat_conversation_start(session_id)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM chat_events WHERE session_id=? "
+                "SELECT * FROM chat_events WHERE session_id=? AND seq>? "
                 "AND payload LIKE ? ESCAPE '\\' ORDER BY seq ASC LIMIT ?",
-                (session_id, f"%{needle}%", limit + 1),
+                (session_id, start, f"%{needle}%", limit + 1),
             ).fetchall()
         has_more = len(rows) > limit
         return [dict(row) for row in rows[:limit]], has_more
@@ -1007,12 +1043,13 @@ class Database:
         return int(row[0]) if row else 0
 
     def chat_unread(self, user_id: int, session_id: str) -> int:
-        last = self.chat_read_get(user_id, session_id)
+        last = int(self.chat_read_get(user_id, session_id) or 0)
+        start = self.chat_conversation_start(session_id)
         with self.lock:
             row = self.conn.execute(
                 "SELECT COUNT(*) FROM chat_events WHERE session_id=? "
                 "AND seq>? AND kind IN ('assistant_block','result','permission')",
-                (session_id, last),
+                (session_id, max(last, start)),
             ).fetchone()
         return int(row[0])
 
@@ -1027,11 +1064,12 @@ class Database:
             )
 
     def chat_checkpoints(self, session_id: str) -> list[dict[str, Any]]:
+        start = self.chat_conversation_start(session_id)
         with self.lock:
             rows = self.conn.execute(
-                "SELECT * FROM chat_checkpoints WHERE session_id=? "
+                "SELECT * FROM chat_checkpoints WHERE session_id=? AND event_seq>? "
                 "ORDER BY event_seq ASC",
-                (session_id,),
+                (session_id, start),
             ).fetchall()
         return [dict(row) for row in rows]
 
