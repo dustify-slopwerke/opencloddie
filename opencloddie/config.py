@@ -100,6 +100,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "permission_timeout_seconds": 300,
         "auto_restart": True,
         "store_tool_outputs": True,
+        # Empty = defer to Claude Code's permissions.defaultMode (the same
+        # setting the TUI uses).  Values: default|acceptEdits|plan|auto|dontAsk.
+        "permission_mode": "",
         "min_claude_version": "2.1.300",
     },
     "database": {
@@ -280,6 +283,20 @@ def _validate(cfg: dict[str, Any]) -> None:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"chat.{key} must be a number") from exc
         chat[key] = min(high, max(low, value))
+    permission_mode = str(chat.get("permission_mode") or "").strip()
+    allowed_modes = {
+        "",
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        "dontAsk",
+        "manual",
+        "bypassPermissions",
+    }
+    if permission_mode not in allowed_modes:
+        raise ValueError(f"chat.permission_mode must be one of {sorted(allowed_modes - {''})}")
+    chat["permission_mode"] = permission_mode
     cfg["chat"] = chat
 
 

@@ -147,6 +147,12 @@ header also restarts the runner with `--resume` (it is refused while a turn is
 running); the model itself is always forced by the gateway, so the UI shows the
 effective key model rather than offering a fake model switch.
 
+By default chat does **not** pass `--permission-mode`, so Claude Code's
+`permissions.defaultMode` and allow rules apply just as they do in the TUI.
+Set `chat.permission_mode` (server config) or use the web header picker to force
+a mode; use **Always allow** on an approval card to persist a rule in
+`.claude/settings.local.json`.
+
 The composer accepts pasted/dropped images (PNG/JPEG/GIF/WebP, size and count
 caps in the `chat` config); they are sent to Claude as Anthropic image content
 blocks.  Chat history can be searched from the header.  Each user turn records

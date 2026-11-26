@@ -1040,7 +1040,8 @@
 }
 
 @media (max-width: 520px) {
-  .chat-head-left .chat-perm-mode, .chat-head-left .chat-perm-select { display: none; }
+  .chat-head-left .chat-perm-mode { display: none; }
+  .chat-head-left .chat-perm-select { max-width: 92px; font-size: 10px; }
   .chat-head-right .chat-state { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
   .chat-timeline { padding: 10px 8px 14px; }
   .chat-bubble { max-width: 96%; border-radius: 12px 12px 4px 12px; }

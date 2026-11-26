@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -801,7 +801,11 @@ def write_runner(
     )
     claude_session_id = item.get("claude_session_id") or str(uuid.uuid4())
     item["claude_session_id"] = claude_session_id
-    permission_mode = _arg_value(claude_args, "--permission-mode") or "default"
+    # An empty mode means "let Claude Code use permissions.defaultMode", the
+    # same setting the TUI honors.  Do not force "default" here.
+    permission_mode = _arg_value(claude_args, "--permission-mode") or str(
+        chat_cfg.get("permission_mode") or ""
+    )
     chat_args = filter_chat_args(claude_args)
     launch = {
         "version": VERSION,
@@ -3499,7 +3503,7 @@ class ChatRunner:
         }
         self.log_path = args.log or self.paths["log"]
         self.model = str(self.launch.get("model") or self.cfg.get("model") or "")
-        self.permission_mode = str(self.launch.get("permission_mode") or "default")
+        self.permission_mode = str(self.launch.get("permission_mode") or "")
         self.claude_session_id = str(self.launch.get("claude_session_id") or "")
         self.claude_version = str(self.launch.get("claude_version") or "")
         self.max_event_bytes = int(
@@ -4195,8 +4199,10 @@ class ChatRunner:
                 "--prompt-suggestions",
                 "--model",
                 self.model,
-                "--permission-mode",
-                self.permission_mode,
+            ]
+            if self.permission_mode:
+                argv += ["--permission-mode", self.permission_mode]
+            argv += [
                 "--permission-prompt-tool",
                 "mcp__opencloddie_permissions__approval_prompt",
             ]

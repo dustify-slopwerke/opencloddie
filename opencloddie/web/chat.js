@@ -66,7 +66,8 @@
     'thinking', 'working', 'running', 'streaming', 'tool', 'tool_use',
     'compacting', 'retrying', 'busy', 'waiting', 'waiting_permission', 'starting',
   ]);
-  const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk'];
+  const PERMISSION_MODES = ['', 'default', 'acceptEdits', 'plan', 'auto', 'dontAsk'];
+  const PERMISSION_LABELS = { '': 'settings' };
   const CHAT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
   /* ---------------------------------------------------------------- shell */
@@ -241,8 +242,8 @@
   }
 
   function setPermissionMode(mode) {
-    if (!state.sessionId || !mode) return;
-    const previous = (state.chat && state.chat.permission_mode) || 'default';
+    if (!state.sessionId) return;
+    const previous = (state.chat && state.chat.permission_mode) || '';
     if (state.deps && state.deps.api) {
       state.deps.api(
         `/api/sessions/${encodeURIComponent(state.sessionId)}/chat/config`,
@@ -286,6 +287,12 @@
     });
   }
 
+  function pendingCount() {
+    const local = state.pending.size;
+    const server = state.chat ? Number(state.chat.pending_count) : 0;
+    return Math.max(local, Number.isFinite(server) ? server : 0);
+  }
+
   function focusPending() {
     for (const [id, card] of state.permissionCards) {
       if (!state.pending.has(id)) continue;
@@ -294,6 +301,16 @@
       setTimeout(() => card.el.classList.remove('is-flash'), 1400);
       return true;
     }
+    return false;
+  }
+
+  function reviewPending() {
+    if (focusPending()) return true;
+    // The server says an approval is pending but its card is not loaded (for
+    // example after a mobile reconnect or a backgrounded tab).  Refresh the
+    // snapshot, which replays pending permissions, then focus it.
+    if (state.session) loadSnapshot(state.session);
+    setTimeout(() => focusPending(), 700);
     return false;
   }
 
@@ -902,6 +919,15 @@
     renderHeader();
     syncComposer();
     scheduleNotify();
+    // On mobile the card can land below the fold.  Reveal a newly arrived
+    // approval instead of making the user hunt for it.
+    if (state.visible && !document.hidden) {
+      requestAnimationFrame(() => {
+        try { card.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { /* ignore */ }
+        card.el.classList.add('is-flash');
+        setTimeout(() => card.el.classList.remove('is-flash'), 1400);
+      });
+    }
   }
 
   function decidePermission(id, decision) {
@@ -984,9 +1010,9 @@
     const session = state.session || {};
     const mode = modeOf(chat, session);
     const status = chat.status || 'offline';
-    const pending = state.pending.size;
+    const pending = pendingCount();
     const model = chat.model || session.model || '';
-    const permissionMode = chat.permission_mode || 'default';
+    const permissionMode = chat.permission_mode || '';
 
     let permControl;
     if (mode === 'chat' && !isBusy()) {
@@ -998,14 +1024,18 @@
           'aria-label': 'Permission mode',
           onchange: (event) => setPermissionMode(event.target.value),
         },
-        ...PERMISSION_MODES.map((value) => deps.h('option', { value }, value)),
+        ...PERMISSION_MODES.map((value) => deps.h(
+          'option',
+          { value },
+          PERMISSION_LABELS[value] || value,
+        )),
       );
       permControl.value = permissionMode;
     } else {
       permControl = deps.h('span', {
         class: 'badge chat-perm-mode',
         title: 'Claude permission mode',
-        text: `perm: ${permissionMode}`,
+        text: `perm: ${permissionMode || 'settings'}`,
       });
     }
 
@@ -1016,12 +1046,12 @@
       }),
       model ? deps.h('code', { class: 'chat-model', text: model }) : null,
       permControl);
-    if (pending > 0) {
+    if (pending > 0 && mode === 'chat') {
       left.append(deps.h('button', {
         class: 'badge chat-pending-badge',
         type: 'button',
-        title: `${pending} pending approval(s)`,
-        onclick: () => focusPending(),
+        title: `${pending} pending approval(s) — tap to review`,
+        onclick: () => reviewPending(),
       }, deps.h('span', { text: String(pending) }), deps.h('span', { text: ' pending' })));
     }
     left.append(deps.h('span', {
@@ -1100,7 +1130,7 @@
     else if (!state.connected) text = 'Reconnecting — messages use the REST fallback';
     else if (busy) text = 'Claude is working…';
     else text = 'Enter to send · Shift+Enter for newline';
-    if (state.pending.size) text = `${state.pending.size} approval pending · ${text}`;
+    if (pendingCount()) text = `${pendingCount()} approval pending · ${text}`;
     if (hint) hint.textContent = text;
     const placeholder = sendable ? 'Message Claude…' : '…';
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
@@ -1310,7 +1340,7 @@
       state.deps.onChatUpdate(state.sessionId, {
         mode: modeOf(chat, state.session),
         status: chat.status || 'offline',
-        pending: state.pending.size,
+        pending: pendingCount(),
         unread,
         last_seq: state.lastSeq,
       });
@@ -2065,5 +2095,5 @@
     });
   }
 
-  window.ChatView = { init, show, hide, destroy, handoff, focusPending };
+  window.ChatView = { init, show, hide, destroy, handoff, focusPending, reviewPending };
 })();

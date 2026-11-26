@@ -263,6 +263,9 @@ client: __agent ◄── unix socket ──► __chat (inside tmux)
   event/tool-result/input byte caps, image limits (`max_image_bytes`,
   `max_input_images`, `max_inline_event_image_bytes`), the approval timeout,
   automatic runner restart, and the minimum Claude Code version.
+  `chat.permission_mode` is empty by default, which **defers to Claude Code's
+  `permissions.defaultMode`** exactly like the TUI; a non-empty value forces
+  that mode for chat sessions (the web header picker can change it).
   `chat.enabled=false` removes the endpoints and the UI.
 - File checkpoints are recorded from the replayed user-message UUIDs and stored
   in `chat_checkpoints`.  Rewinding pauses the runner, runs

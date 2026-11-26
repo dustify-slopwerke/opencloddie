@@ -4,6 +4,21 @@ All notable changes to opencloddie are documented here.  The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-26
+
+### Fixed
+
+- Chat no longer forces `--permission-mode default`; by default it defers to
+  Claude Code's `permissions.defaultMode` and allow rules, matching the TUI.
+  `chat.permission_mode` (server config) or the web header picker can still
+  force a mode; the picker is now visible on mobile too.
+- New approval cards scroll themselves into view; the "N pending" chip reloads
+  the snapshot and focuses the card if it is not loaded (mobile reconnect).
+- Pending approvals are expired when the chat runner exits or the session
+  switches to terminal mode, and pending badges are hidden outside chat mode,
+  so a stopped runner cannot leave a stale "1 pending" chip.
+- The permission-mode picker includes a "settings" (defer) option.
+
 ## [0.6.1] - 2026-11-25
 
 ### Fixed

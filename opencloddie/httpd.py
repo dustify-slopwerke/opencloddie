@@ -549,6 +549,9 @@ class Handler(BaseHTTPRequestHandler):
                         "max_image_bytes": app.chat.max_image_bytes,
                         "max_input_images": app.chat.max_input_images,
                         "max_inline_event_image_bytes": app.chat.max_inline_event_image_bytes,
+                        "permission_mode": (app.cfg.get("chat") or {}).get(
+                            "permission_mode", ""
+                        ),
                     },
                     "urls": urls,
                     "install": {
@@ -1503,6 +1506,9 @@ class Handler(BaseHTTPRequestHandler):
                             app.chat.max_inline_event_image_bytes
                         ),
                         "permission_timeout_seconds": app.chat.permission_timeout,
+                        "permission_mode": (app.cfg.get("chat") or {}).get(
+                            "permission_mode", ""
+                        ),
                         "min_claude_version": (app.cfg.get("chat") or {}).get(
                             "min_claude_version", "2.1.300"
                         ),

@@ -655,6 +655,8 @@ class ChatBroker:
         fields: dict[str, Any] = {"status": status}
         if mode:
             fields["mode"] = mode
+        if mode == "tui":
+            self._expire_pending(session_id)
         self.app.db.chat_state_upsert(session_id, **fields)
         self._broadcast(
             session_id,
@@ -670,8 +672,29 @@ class ChatBroker:
             {"t": "state", "chat": self.public_state(session_id, self._owner(session_id))},
         )
 
+    def _expire_pending(self, session_id: str) -> None:
+        """A stopped runner or a mode switch cannot answer pending approvals."""
+        for row in self.app.db.chat_permissions_pending(session_id):
+            resolved = self.app.db.chat_permission_expire(row["id"])
+            if resolved is None:
+                continue
+            try:
+                self._send_agent(
+                    session_id,
+                    {
+                        "t": "chat_permission_result",
+                        "permission_id": row["id"],
+                        "result": _json(resolved.get("decision"), {}),
+                    },
+                )
+            except ChatError:
+                pass
+            self._finish_permission(resolved)
+
     def _on_status(self, session_id: str, message: dict[str, Any]) -> None:
         status = "error" if message.get("t") == "chat_error" else "offline"
+        if message.get("t") == "chat_exit":
+            self._expire_pending(session_id)
         self.app.db.chat_state_upsert(session_id, status=status)
         self._broadcast(
             session_id,
@@ -921,6 +944,7 @@ class ChatBroker:
     ) -> None:
         self._check_owner(session_id, user_id)
         allowed = {
+            "",
             "default",
             "acceptEdits",
             "plan",

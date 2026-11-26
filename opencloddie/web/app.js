@@ -669,14 +669,14 @@ function renderTopbar() {
     }
     if (active && active.chat) {
       const pending = Number(active.chat.pending || 0);
-      if (pending > 0 && window.ChatView) {
+      if (pending > 0 && isChatSession(active) && window.ChatView) {
         root.append(
           h('button', {
             class: 'badge chat-pending-badge topbar-pending',
             type: 'button',
             text: `${pending} pending`,
-            title: `${pending} pending approval(s)`,
-            onclick: () => ChatView.focusPending(),
+            title: `${pending} pending approval(s) — tap to review`,
+            onclick: () => ChatView.reviewPending(),
           }),
         );
       }
@@ -1225,7 +1225,7 @@ function renderTabs() {
       chatUnread > 0 && session.id !== state.activeId
         ? h('span', { class: 'tab-chat-unread', title: `${chatUnread} unread chat event(s)` })
         : null,
-      chatPending > 0
+      chatPending > 0 && chatMode
         ? h('span', { class: 'tab-badge tab-pending', text: String(chatPending), title: `${chatPending} pending approval(s)` })
         : null,
       session.unread > 0
