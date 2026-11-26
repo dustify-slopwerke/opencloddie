@@ -45,6 +45,8 @@
     streaming: false,
     pinned: true,
     scrollScheduled: false,
+    programmaticScroll: false,
+    programmaticTimer: null,
     composerScheduled: false,
     bound: false,
     lastErrorToast: 0,
@@ -317,8 +319,76 @@
     // example after a mobile reconnect or a backgrounded tab).  Refresh the
     // snapshot, which replays pending permissions, then focus it.
     if (state.session) loadSnapshot(state.session);
-    setTimeout(() => focusPending(), 700);
+    setTimeout(() => {
+      if (focusPending()) return;
+      pendingModal();
+    }, 700);
     return false;
+  }
+
+  function pendingModal() {
+    const sessionId = state.sessionId;
+    const deps = state.deps;
+    if (!sessionId || !deps) return;
+    deps.api(`/api/sessions/${encodeURIComponent(sessionId)}/chat?limit=1`)
+      .then((data) => {
+        const pending = Array.isArray(data && data.pending) ? data.pending : [];
+        if (!pending.length) {
+          if (deps.toast) deps.toast('No pending approvals');
+          return;
+        }
+        const p = pending[0];
+        const decide = async (decision) => {
+          const payload = {
+            behavior: decision && decision.behavior === 'deny' ? 'deny' : 'allow',
+          };
+          if (decision && decision.updated_input !== undefined) {
+            payload.updated_input = decision.updated_input;
+          }
+          if (decision && decision.updated_permissions) {
+            payload.updated_permissions = decision.updated_permissions;
+          }
+          if (decision && decision.message) payload.message = decision.message;
+          try {
+            await deps.api(
+              `/api/sessions/${encodeURIComponent(sessionId)}/chat/permissions/${encodeURIComponent(p.id)}`,
+              { method: 'POST', body: payload },
+            );
+            state.pending.delete(p.id);
+            renderHeader();
+            syncComposer();
+            if (deps.closeModal) deps.closeModal();
+            if (deps.toast) deps.toast(payload.behavior === 'allow' ? 'Approved' : 'Denied');
+            return true;
+          } catch (error) {
+            if (deps.toast) {
+              deps.toast(error && error.message ? error.message : 'Could not answer the request', 'error');
+            }
+            return false;
+          }
+        };
+        // Reuse the full card: it renders the AskUserQuestion form, plan
+        // approval, and the normal Allow/Deny controls in one place.
+        const card = window.ChatRender.permissionCard(p, { decide });
+        const wrap = deps.h('div', { class: 'chat-perm-modal-wrap' }, card.el);
+        if (pending.length > 1) {
+          wrap.append(deps.h('p', {
+            class: 'chat-perm-modal-note',
+            text: `${pending.length - 1} more approval(s) queued.`,
+          }));
+        }
+        deps.openModal({
+          title: 'Pending approval',
+          body: wrap,
+          dismissible: true,
+          actions: [],
+        });
+      })
+      .catch((error) => {
+        if (deps.toast) {
+          deps.toast(error && error.message ? error.message : 'Could not load pending approvals', 'error');
+        }
+      });
   }
 
   /* -------------------------------------------------------------- loading */
@@ -1178,6 +1248,10 @@
     if (!root) return;
     const deps = state.deps;
     if (!deps) return;
+    // Rebuilding the header closes a native <select> that is currently open
+    // (notably on mobile).  Leave it alone while the user is interacting.
+    const active = document.activeElement;
+    if (active && root.contains(active) && /^(SELECT|INPUT|TEXTAREA)$/.test(active.tagName)) return;
     deps.clear(root);
     const chat = state.chat || {};
     const session = state.session || {};
@@ -1443,7 +1517,17 @@
     const run = () => {
       state.scrollScheduled = false;
       const tl = timeline();
-      if (tl && state.pinned && !state.replaying) tl.scrollTop = tl.scrollHeight;
+      if (!tl || !state.pinned || state.replaying) return;
+      // The scroll event fired by this assignment must not be mistaken for
+      // the reader scrolling away, especially on mobile where content can
+      // grow between the scroll and its event.
+      state.programmaticScroll = true;
+      if (state.programmaticTimer) clearTimeout(state.programmaticTimer);
+      tl.scrollTop = tl.scrollHeight;
+      state.programmaticTimer = setTimeout(() => {
+        state.programmaticScroll = false;
+        state.programmaticTimer = null;
+      }, 120);
     };
     if (window.requestAnimationFrame) window.requestAnimationFrame(run);
     else setTimeout(run, 16);
@@ -2257,7 +2341,7 @@
     const tl = timeline();
     if (tl) {
       tl.addEventListener('scroll', () => {
-        state.pinned = isNearBottom();
+        state.pinned = state.programmaticScroll ? true : isNearBottom();
         // Pull older pages as the reader approaches the top.
         if (tl.scrollTop < 120 && state.hasOlder && !state.loadingOlder && !state.loading) {
           loadOlder();
@@ -2266,6 +2350,9 @@
     }
     window.addEventListener('resize', () => {
       if (state.search.open) positionSearchPanel();
+      // Mobile keyboards and rotating screens change the viewport after the
+      // fact; restore the bottom if the reader was pinned there.
+      setTimeout(() => { if (state.pinned) scrollIfPinned(); }, 80);
     }, { passive: true });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { stopTick(); return; }

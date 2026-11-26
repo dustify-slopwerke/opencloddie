@@ -2246,6 +2246,7 @@ if (window.ChatView) {
     confirmDialog,
     toast,
     copyText,
+    closeModal,
     chatConfig() {
       return (state.me && state.me.chat) || null;
     },

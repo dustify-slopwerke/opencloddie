@@ -6,6 +6,19 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-26
+
+### Fixed
+
+- Approvals are reachable even when the inline card is not: the "N pending"
+  chip now opens a modal that reuses the real permission card, including the
+  `AskUserQuestion` answer form and plan approval, and posts the decision
+  directly.
+- The permission-mode picker no longer closes itself: the chat header skips a
+  rebuild while a select/input inside it has focus.
+- Scroll pinning now ignores the scroll events caused by its own auto-scroll
+  and re-pins after mobile keyboard/viewport changes, so new output keeps up.
+
 ## [0.6.3] - 2026-11-26
 
 ### Fixed
