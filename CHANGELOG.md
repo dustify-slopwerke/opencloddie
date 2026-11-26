@@ -6,6 +6,8 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-26
+
 ### Fixed
 
 - Web chat `/clear` now starts a new conversation like Claude Code: the runner
@@ -249,7 +251,11 @@ First public release.
 - Clipboard copy works from xterm selections, the visible screen, and the tmux
   paste buffer.
 
-[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/dustify-slopwerke/opencloddie/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.6.3
+[0.6.2]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.6.2
+[0.6.1]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.6.1
+[0.6.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.6.0
 [0.5.1]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.5.1
 [0.5.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dustify-slopwerke/opencloddie/releases/tag/v0.4.0
