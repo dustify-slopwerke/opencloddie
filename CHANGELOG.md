@@ -6,6 +6,23 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-11-27
+
+### Fixed
+
+- Chat streaming now follows the CLI's real event order, where a stream-level
+  `message_stop` can arrive before the durable assistant blocks.  The stream
+  group stays migratable so the final block replaces it instead of appending a
+  second copy, and an interrupted turn keeps its partial text.  Removed a
+  text-based dedupe that could hide legitimate repeated blocks.
+- Pending approvals that disappear server-side (approved or denied in another
+  tab, or expired while the socket was down) are reconciled away, so the badge
+  and inline card cannot linger on a phantom request.
+- "Load earlier messages" preserves page order even when its anchor row is
+  removed during rendering.
+- Jumping to your last message or a search result is treated as intentional
+  navigation and is no longer undone by auto-scroll.
+
 ## [0.6.8] - 2026-11-27
 
 ### Fixed

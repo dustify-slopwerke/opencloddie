@@ -673,14 +673,7 @@
         );
       }
     }
-    for (const permission of Array.isArray(data.pending) ? data.pending : []) {
-      try {
-        addPermission(permission, { reveal: false });
-      } catch (error) {
-        renderErrors += 1;
-        console.error('opencloddie: failed to render pending permission', permission, error);
-      }
-    }
+    if (Array.isArray(data.pending)) reconcilePending(data.pending);
     state.lastSeq = Math.max(state.lastSeq, Number(data.last_seq) || 0);
     state.oldestSeq = oldestEventSeq(events);
     state.hasOlder = Boolean(data.has_more) && state.oldestSeq > 0;
@@ -781,7 +774,16 @@
       const previousTop = tl.scrollTop;
       const events = Array.isArray(data.events) ? data.events : [];
       const control = tl.querySelector('.chat-older');
-      const anchor = control ? control.nextSibling : tl.firstChild;
+      const transient = (node) => Boolean(node && node.classList
+        && (node.classList.contains('chat-empty') || node.classList.contains('chat-loading')));
+      let anchor = control ? control.nextSibling : tl.firstChild;
+      if (transient(anchor)) anchor = null;
+      let fallback = anchor;
+      if (!fallback) {
+        let node = control ? control.nextSibling : tl.firstChild;
+        while (node && transient(node)) node = node.nextSibling;
+        fallback = node || null;
+      }
       const existing = new Set(tl.childNodes);
       const lastUser = state.lastUser;
       const liveTools = new Set(state.runningTools);
@@ -816,13 +818,16 @@
       // the older page appended at the bottom — which looked like the chat
       // "rolling back" to an old release turn.
       const added = Array.from(tl.childNodes).filter((node) => !existing.has(node));
+      const fragment = document.createDocumentFragment();
+      for (const node of added) fragment.append(node);
       let target = anchor && anchor.parentNode === tl ? anchor : null;
-      if (!target) {
-        target = control && control.parentNode === tl ? control.nextSibling : tl.firstChild;
-      }
-      for (const node of added) {
-        if (target && target.parentNode === tl) tl.insertBefore(node, target);
-        else tl.insertBefore(node, tl.firstChild);
+      if (!target && fallback && fallback.parentNode === tl) target = fallback;
+      if (target) {
+        tl.insertBefore(fragment, target);
+      } else if (control && control.parentNode === tl) {
+        control.after(fragment);
+      } else {
+        tl.insertBefore(fragment, tl.firstChild);
       }
       const oldest = oldestEventSeq(events);
       if (oldest && oldest < before) {
@@ -1010,13 +1015,7 @@
         );
       }
     }
-    for (const permission of Array.isArray(frame.pending) ? frame.pending : []) {
-      try {
-        addPermission(permission, { reveal: false });
-      } catch (error) {
-        console.error('opencloddie: failed to render replayed permission', permission, error);
-      }
-    }
+    if (Array.isArray(frame.pending)) reconcilePending(frame.pending);
     state.lastSeq = Math.max(state.lastSeq, Number(frame.last_seq) || 0);
     if (events.length && !state.oldestSeq) {
       state.oldestSeq = oldestEventSeq(events);
@@ -1186,19 +1185,6 @@
     if (!group) return;
     group.finalBlocks.add(blockIndex);
     const type = block.type;
-    const blockText = type === 'text'
-      ? String(block.text || '')
-      : (type === 'thinking' || type === 'redacted_thinking')
-        ? String(block.thinking || block.text || '')
-        : '';
-    // A replayed/final event can repeat the last text/thinking block verbatim;
-    // rendering it again is what made whole paragraphs appear twice.
-    if (blockText && group.lastBlock && group.lastBlock.type === type
-      && group.lastBlock.text === blockText) {
-      return;
-    }
-    if (blockText) group.lastBlock = { type, text: blockText };
-    else group.lastBlock = null;
     if (type === 'text') {
       const text = block.text || '';
       const streamed = takeStream(group.key, blockIndex, 'text');
@@ -1239,16 +1225,22 @@
   function handleMessageStop(payload) {
     const messageId = payload.message_id ? String(payload.message_id) : '';
     for (const group of state.groups.values()) {
-      if (!messageId || group.messageId === messageId) group.finalized = true;
+      if (!messageId || group.messageId === messageId) {
+        // Only finalize a group that rendered at least one final block.  The
+        // stream-level message_stop can arrive before the durable assistant
+        // blocks; finalizing then would prevent the stream group from being
+        // migrated and the final text would be appended a second time.
+        if (group.finalBlocks.size > 0) group.finalized = true;
+      }
     }
-    for (const [key, entry] of Array.from(state.streams.entries())) {
+    for (const entry of state.streams.values()) {
       const parts = entry.groupKey.split('|');
       if (messageId && parts[parts.length - 1] !== messageId) continue;
-      // Any stream not consumed by a final block is stale.  Leaving it in the
-      // DOM duplicates the finalized text/thinking; dispose it at message end.
+      // Keep the element.  It is the partial answer until its final block
+      // replaces it (takeStream removes the entry), or forever if the turn was
+      // interrupted.  Disposing here loses text when message_stop precedes the
+      // assistant blocks.
       try { entry.controller.removeCursor(); } catch (_) { /* ignore */ }
-      try { entry.controller.dispose(); } catch (_) { /* ignore */ }
-      state.streams.delete(key);
     }
   }
 
@@ -1328,7 +1320,11 @@
     if (!group && messageId) {
       const streamKey = `${parentKey}|stream`;
       const streamed = state.groups.get(streamKey);
-      if (streamed && !streamed.finalized) {
+      // A stream-level message_stop can arrive before the final blocks, which
+      // would mark the stream group finalized even though no block has consumed
+      // it yet.  Still migrate such a group; otherwise the final block creates
+      // a second group and the same text appears twice.
+      if (streamed && (!streamed.finalized || streamed.finalBlocks.size === 0)) {
         state.groups.delete(streamKey);
         for (const [streamMapKey, entry] of Array.from(state.streams)) {
           if (entry.groupKey !== streamKey) continue;
@@ -1339,6 +1335,7 @@
         }
         streamed.key = key;
         streamed.messageId = messageKey;
+        streamed.finalized = false;
         state.groups.set(key, streamed);
         group = streamed;
       }
@@ -1425,6 +1422,30 @@
   }
 
   /* ----------------------------------------------------------- permissions */
+  function reconcilePending(list) {
+    if (!Array.isArray(list)) return;
+    const ids = new Set();
+    const incoming = [];
+    for (const permission of list) {
+      const id = String(permission && (permission.id || permission.permission_id) || '');
+      if (!id) continue;
+      ids.add(id);
+      incoming.push(permission);
+    }
+    // The authoritative list can be shorter than our local set when another
+    // tab approved/denied, or a request expired while this socket was down.
+    for (const id of Array.from(state.pending.keys())) {
+      if (!ids.has(id)) resolvePermission(id, 'resolved', { message: 'No longer pending' });
+    }
+    for (const permission of incoming) {
+      try {
+        addPermission(permission, { reveal: false, track: true });
+      } catch (error) {
+        console.error('opencloddie: failed to reconcile permission', permission, error);
+      }
+    }
+  }
+
   function addPermission(permission, options) {
     const perm = permission && typeof permission === 'object' ? permission : {};
     const id = String(perm.id || perm.permission_id || '');
@@ -2420,6 +2441,7 @@
   function jumpToSeq(seq, resultEl) {
     const target = state.seqEls.get(Number(seq));
     if (target && target.isConnected) {
+      state.userScrolled = true;
       state.pinned = false;
       try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { target.scrollIntoView(); }
       target.classList.add('is-search-target');
@@ -2600,10 +2622,18 @@
      card too. */
   function syncPending() {
     if (!state.visible || document.hidden || !state.loaded || !state.session) return;
-    const fromSession = Number(state.session.chat && state.session.chat.pending) || 0;
+    const sessionChat = state.session.chat;
+    const fromSession = sessionChat && sessionChat.pending != null
+      ? Number(sessionChat.pending)
+      : NaN;
     const fromChat = Number(state.chat && state.chat.pending_count) || 0;
-    const want = Math.max(fromSession, fromChat);
-    if (want <= pendingCount()) return;
+    // The session-list count is refreshed from the database every few seconds
+    // and is the best signal that a request disappeared while our socket was
+    // down.  Fall back to the chat state for older summaries.
+    const want = Number.isFinite(fromSession) ? fromSession : Math.max(pendingCount(), fromChat);
+    // Reconcile both directions: more requests than we know about, or fewer
+    // (approved/denied in another tab, or expired).
+    if (want === pendingCount()) return;
     if (state.pendingFetch && Date.now() - state.pendingFetch < 5000) return;
     state.pendingFetch = Date.now();
     const sessionId = state.sessionId;
@@ -2616,16 +2646,7 @@
             state.session.chat.pending = Number(data.chat.pending_count) || 0;
           }
         }
-        const pending = Array.isArray(data && data.pending) ? data.pending : [];
-        for (const permission of pending) {
-          const id = String(permission && (permission.id || permission.permission_id) || '');
-          if (!id || state.permissionCards.has(id)) continue;
-          try {
-            addPermission(permission, { reveal: state.pinned, track: true });
-          } catch (error) {
-            console.error('opencloddie: failed to render synced permission', permission, error);
-          }
-        }
+        if (Array.isArray(data && data.pending)) reconcilePending(data.pending);
         renderHeader();
         syncComposer();
         scheduleNotify();
