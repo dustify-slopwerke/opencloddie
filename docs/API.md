@@ -16,7 +16,7 @@ not safe to expose: it trusts the identity header.
 ### `GET /healthz`
 
 ```json
-{"ok": true, "version": "0.6.4", "mode": "api", "uptime": 42}
+{"ok": true, "version": "0.6.5", "mode": "api", "uptime": 42}
 ```
 
 No auth.
@@ -208,7 +208,7 @@ Used by `opencloddie __agent`.  Auth via the same API key (header or query).
 Handshake, then a JSON hello:
 
 ```json
-{"t":"hello","agent_id":"a-...","version":"0.6.4","hostname":"laptop",
+{"t":"hello","agent_id":"a-...","version":"0.6.5","hostname":"laptop",
  "platform":"linux","session":{"id":"s_...","name":"work","cwd":"/home/alice/src/api"}}
 ```
 
@@ -317,7 +317,7 @@ returns the requested (or nearest allowed) range and its resolution in
 {"ok":true,"generated_at":"...","scope":"admin|self",
  "window_seconds":3600,"step_seconds":60,
  "live":{
-   "process":{"version":"0.6.4","uptime_seconds":9200,"pid":123,"python":"3.12.8",
+   "process":{"version":"0.6.5","uptime_seconds":9200,"pid":123,"python":"3.12.8",
               "platform":"linux","threads":24,"open_fds":34,
               "memory":{"rss_bytes":52428800,"vms_bytes":0,"peak_rss_bytes":0},
               "cpu":{"user_seconds":1.2,"system_seconds":0.4},
@@ -507,7 +507,7 @@ interrupts restart the headless process with `--resume` because SIGINT ends it.
 
 ### `GET /healthz`
 
-`{"ok":true,"version":"0.6.4","mode":"web"}` (no auth).
+`{"ok":true,"version":"0.6.5","mode":"web"}` (no auth).
 
 ## Static assets
 
@@ -541,7 +541,7 @@ is same-origin only.  This also underpins CSRF defence for the web listener.
 
 ## Versioning
 
-`v0.6.4`.  The public API mirrors the Anthropic Messages API and tracks the
+`v0.6.5`.  The public API mirrors the Anthropic Messages API and tracks the
 upstream's behavior; additive response headers and fields are expected.  The
 agent/terminal WebSocket protocols are internal and may change between minor
 versions; client and server should be upgraded together.

@@ -10,6 +10,7 @@
   const state = {
     inited: false,
     deps: null,
+    cache: new Map(),
     sessionId: null,
     session: null,
     chat: null,
@@ -176,19 +177,23 @@
       markReadSoon();
       return;
     }
+    if (state.sessionId && state.loaded) saveSessionCache(state.sessionId);
     closeSocket();
     stopTimers();
     cancelRewind();
     resetAttachments();
     resetSearch();
     setSuggestion('');
+    blankSessionState();
     state.sessionId = session.id;
-    state.loading = false;
+    state.session = session;
     state.chat = session.chat ? normalizeChat(session.chat) : null;
-    resetTimeline();
-    renderHeader();
-    syncComposer();
-    loadSnapshot(session);
+    if (!restoreSessionCache(session)) {
+      resetTimeline();
+      renderHeader();
+      syncComposer();
+      loadSnapshot(session);
+    }
   }
 
   function hide() {
@@ -200,7 +205,15 @@
   }
 
   function destroy(sessionId) {
-    if (state.sessionId !== sessionId) return;
+    if (state.sessionId !== sessionId) {
+      const cached = state.cache.get(sessionId);
+      if (cached) {
+        disposeCached(cached);
+        state.cache.delete(sessionId);
+      }
+      return;
+    }
+    state.cache.delete(sessionId);
     hide();
     cancelRewind();
     resetAttachments();
@@ -232,8 +245,10 @@
       { confirmLabel: 'Delete', danger: true },
     ).then((ok) => {
       if (!ok) return;
+      const sessionId = state.sessionId;
+      state.cache.delete(sessionId);
       state.deps.api(
-        `/api/sessions/${encodeURIComponent(state.sessionId)}/chat/history`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/chat/history`,
         { method: 'DELETE' },
       ).then(() => {
         resetTimeline();
@@ -392,23 +407,20 @@
   }
 
   /* -------------------------------------------------------------- loading */
-  function resetTimeline() {
-    for (const card of state.permissionCards.values()) {
-      try { card.dispose(); } catch (_) { /* ignore */ }
-    }
-    state.permissionCards.clear();
-    state.pending.clear();
-    state.groups.clear();
-    state.streams.clear();
-    state.toolCards.clear();
-    state.runningTools.clear();
-    state.nestedContainers.clear();
-    state.applied.clear();
-    state.appliedIds.clear();
+  function blankSessionState() {
+    state.pending = new Map();
+    state.permissionCards = new Map();
+    state.groups = new Map();
+    state.streams = new Map();
+    state.toolCards = new Map();
+    state.runningTools = new Set();
+    state.nestedContainers = new Map();
+    state.applied = new Set();
+    state.appliedIds = new Set();
     state.optimistic = [];
-    state.checkpoints.clear();
+    state.checkpoints = new Map();
+    state.seqEls = new Map();
     state.lastUser = null;
-    state.seqEls.clear();
     state.lastSeq = 0;
     state.oldestSeq = 0;
     state.hasOlder = false;
@@ -417,6 +429,115 @@
     state.streaming = false;
     state.pinned = true;
     state.loaded = false;
+    state.loading = false;
+    state.suggestion = '';
+  }
+
+  function disposeCached(entry) {
+    if (!entry) return;
+    for (const card of entry.permissionCards.values()) {
+      try { card.dispose(); } catch (_) { /* ignore */ }
+    }
+  }
+
+  // Keep a session's rendered timeline, maps and scroll position so switching
+  // tabs does not reload only the newest page and lose earlier history.
+  function saveSessionCache(sessionId) {
+    if (!sessionId || !state.loaded) return;
+    const tl = timeline();
+    const nodes = tl ? Array.from(tl.childNodes) : [];
+    if (tl) state.deps.clear(tl);
+    state.cache.set(sessionId, {
+      session: state.session,
+      chat: state.chat,
+      pending: state.pending,
+      permissionCards: state.permissionCards,
+      groups: state.groups,
+      streams: state.streams,
+      toolCards: state.toolCards,
+      runningTools: state.runningTools,
+      nestedContainers: state.nestedContainers,
+      applied: state.applied,
+      appliedIds: state.appliedIds,
+      optimistic: state.optimistic,
+      checkpoints: state.checkpoints,
+      seqEls: state.seqEls,
+      lastUser: state.lastUser,
+      lastSeq: state.lastSeq,
+      oldestSeq: state.oldestSeq,
+      hasOlder: state.hasOlder,
+      loadingOlder: state.loadingOlder,
+      lastMarkedRead: state.lastMarkedRead,
+      suggestion: state.suggestion,
+      nodes,
+      scrollTop: tl ? tl.scrollTop : 0,
+    });
+    const keys = Array.from(state.cache.keys());
+    while (keys.length > 8) {
+      const key = keys.shift();
+      if (key === sessionId) { keys.push(key); continue; }
+      const entry = state.cache.get(key);
+      state.cache.delete(key);
+      disposeCached(entry);
+    }
+  }
+
+  function restoreSessionCache(session) {
+    const entry = state.cache.get(session.id);
+    if (!entry) return false;
+    state.sessionId = session.id;
+    state.session = session;
+    state.chat = Object.assign({}, entry.chat || {}, normalizeChat(session.chat || {}));
+    state.pending = entry.pending;
+    state.permissionCards = entry.permissionCards;
+    state.groups = entry.groups;
+    state.streams = entry.streams;
+    state.toolCards = entry.toolCards;
+    state.runningTools = entry.runningTools;
+    state.nestedContainers = entry.nestedContainers;
+    state.applied = entry.applied;
+    state.appliedIds = entry.appliedIds;
+    state.optimistic = entry.optimistic;
+    state.checkpoints = entry.checkpoints;
+    state.seqEls = entry.seqEls;
+    state.lastUser = entry.lastUser;
+    state.lastSeq = entry.lastSeq;
+    state.oldestSeq = entry.oldestSeq;
+    state.hasOlder = entry.hasOlder;
+    state.loadingOlder = false;
+    state.lastMarkedRead = entry.lastMarkedRead;
+    state.suggestion = entry.suggestion || '';
+    state.loaded = true;
+    state.loading = false;
+    state.streaming = false;
+    state.pinned = true;
+    const tl = timeline();
+    if (tl) {
+      state.deps.clear(tl);
+      for (const node of entry.nodes) tl.append(node);
+    }
+    updateOlderControl();
+    renderHeader();
+    syncComposer();
+    // Returning to a session should land at the newest message.
+    scrollToBottom(true);
+    if (state.visible) {
+      connect(state.lastSeq);
+      startTick();
+      markReadSoon();
+    }
+    scheduleNotify();
+    // The live view owns these maps/nodes now; save a fresh entry if the
+    // session is left again.
+    state.cache.delete(session.id);
+    return true;
+  }
+
+  function resetTimeline() {
+    for (const card of state.permissionCards.values()) {
+      try { card.dispose(); } catch (_) { /* ignore */ }
+    }
+    blankSessionState();
     const tl = timeline();
     if (!tl) return;
     state.deps.clear(tl);
@@ -429,6 +550,7 @@
   // old events stored but stops returning them; mirror that in the live view
   // without resetting lastSeq (the boundary itself is the newest seq we know).
   function handleConversationReset() {
+    if (state.sessionId) state.cache.delete(state.sessionId);
     for (const card of state.permissionCards.values()) {
       try { card.dispose(); } catch (_) { /* ignore */ }
     }

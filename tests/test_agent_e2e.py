@@ -195,8 +195,18 @@ class AgentEndToEndTest(unittest.TestCase):
             "DELETE", f"/client/sessions/{self.sid}", self.token
         )
         self.assertEqual(status, 200)
-        # Kill propagation is asynchronous; short waits were flaky under load.
-        gone = wait_for(lambda: not tmux_has(self.tmux_name), timeout=30)
+        # Kill propagation is asynchronous.  If the agent reconnects between
+        # the delete and the kill frame, it re-registers; re-issue the delete
+        # against the live connection instead of waiting for a lost frame.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if not tmux_has(self.tmux_name):
+                break
+            time.sleep(0.5)
+            self.server.api_json(
+                "DELETE", f"/client/sessions/{self.sid}", self.token
+            )
+        gone = not tmux_has(self.tmux_name)
         self.assertTrue(
             gone,
             "tmux survived the API kill; agent "

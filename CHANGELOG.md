@@ -6,6 +6,17 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-27
+
+### Fixed
+
+- Switching between sessions no longer discards the chat you had loaded: each
+  session's rendered timeline, paged-in history, tool/approval state and scroll
+  are kept in memory while another tab is active, and returning lands at the
+  newest message.  Previously only the newest 500 events were reloaded, so a
+  tool-heavy conversation looked truncated and any "Load earlier messages"
+  pages were lost.
+
 ## [0.6.4] - 2026-11-26
 
 ### Fixed
