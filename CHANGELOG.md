@@ -6,6 +6,31 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-11-27
+
+### Fixed
+
+- Refreshing no longer rolls the chat back to an old point (for example, an
+  old release turn).  A chat WebSocket `hello` replay that contains an older
+  page of events is ignored once the snapshot is loaded; previously those
+  events were appended below the newest messages.  A single unrenderable event
+  also no longer aborts the rest of the snapshot, and older pages are always
+  prepended, never appended.
+- Reload and browser scroll restoration keep the view on the newest message.
+  Auto-loading older history now requires an actual reader gesture, so a
+  restored scroll position cannot page backwards on its own.
+- Streamed assistant text and thinking no longer appear twice: unconsumed
+  stream bubbles are disposed at message end, and adjacent identical blocks are
+  deduplicated.
+- Pending approvals missed by the live chat socket are reconciled from the
+  server, so the inline approval card appears without a reload.  The modal and
+  the pending badge remain server-backed.
+
+### Added
+
+- A "↑ Your last message" jump control appears when your most recent message is
+  off-screen (the assistant turn can be very long), and scrolls straight to it.
+
 ## [0.6.7] - 2026-11-27
 
 ### Fixed

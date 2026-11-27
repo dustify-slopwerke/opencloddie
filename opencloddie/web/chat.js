@@ -43,6 +43,8 @@
     loadingOlder: false,
     replaying: false,
     lastMarkedRead: 0,
+    pendingFetch: 0,
+    userScrolled: false,
     streaming: false,
     pinned: true,
     scrollScheduled: false,
@@ -461,6 +463,8 @@
     state.hasOlder = false;
     state.loadingOlder = false;
     state.lastMarkedRead = 0;
+    state.pendingFetch = 0;
+    state.userScrolled = false;
     state.streaming = false;
     state.pinned = true;
     state.loaded = false;
@@ -653,15 +657,45 @@
     const events = Array.isArray(data.events) ? data.events : [];
     // Snapshot events are history: render them, but do not run live-only side
     // effects (revealing old approvals, toast/suggestion/status mutations).
-    for (const event of events) applyEvent(event, { historical: true });
+    // One unrenderable event must not abort the rest of the transcript and
+    // leave the reader stranded at an old point.
+    let renderErrors = 0;
+    for (const event of events) {
+      try {
+        applyEvent(event, { historical: true });
+      } catch (error) {
+        renderErrors += 1;
+        console.error(
+          'opencloddie: failed to render chat event',
+          event && event.seq,
+          event && event.kind,
+          error,
+        );
+      }
+    }
     for (const permission of Array.isArray(data.pending) ? data.pending : []) {
-      addPermission(permission, { reveal: false });
+      try {
+        addPermission(permission, { reveal: false });
+      } catch (error) {
+        renderErrors += 1;
+        console.error('opencloddie: failed to render pending permission', permission, error);
+      }
     }
     state.lastSeq = Math.max(state.lastSeq, Number(data.last_seq) || 0);
     state.oldestSeq = oldestEventSeq(events);
     state.hasOlder = Boolean(data.has_more) && state.oldestSeq > 0;
     updateOlderControl();
     finalizeSnapshot();
+    if (renderErrors) {
+      const tl = timeline();
+      if (tl) {
+        tl.append(window.ChatRender.statusRow(
+          `${renderErrors} chat event(s) could not be rendered on this browser.`,
+          { kind: 'error' },
+        ));
+      }
+    }
+    updateJumpButton();
     renderHeader();
     syncComposer();
     if (state.visible) {
@@ -670,6 +704,7 @@
       markReadSoon();
     }
     scheduleNotify();
+    syncPending();
   }
 
   function finalizeSnapshot() {
@@ -681,6 +716,12 @@
       tl.append(window.ChatRender.emptyState(emptyMessage()));
     }
     scrollToBottom(true);
+    // Browser scroll restoration and late layout can leave a reload at the
+    // top of the loaded page.  Re-pin after the frame settles, but never if
+    // the reader has deliberately scrolled away.
+    setTimeout(() => { if (state.pinned && state.visible) scrollToBottom(true); }, 120);
+    setTimeout(() => { if (state.pinned && state.visible) scrollToBottom(true); }, 600);
+    updateJumpButton();
   }
 
   function emptyMessage() {
@@ -740,17 +781,24 @@
       const previousTop = tl.scrollTop;
       const events = Array.isArray(data.events) ? data.events : [];
       const control = tl.querySelector('.chat-older');
-      let anchor = control ? control.nextSibling : tl.firstChild;
-      if (anchor && anchor.classList
-        && (anchor.classList.contains('chat-empty') || anchor.classList.contains('chat-loading'))) {
-        anchor = null;
-      }
+      const anchor = control ? control.nextSibling : tl.firstChild;
       const existing = new Set(tl.childNodes);
       const lastUser = state.lastUser;
       const liveTools = new Set(state.runningTools);
       state.replaying = true;
       try {
-        for (const event of events) applyEvent(event, { historical: true });
+        for (const event of events) {
+          try {
+            applyEvent(event, { historical: true });
+          } catch (error) {
+            console.error(
+              'opencloddie: failed to render older chat event',
+              event && event.seq,
+              event && event.kind,
+              error,
+            );
+          }
+        }
       } finally {
         state.replaying = false;
       }
@@ -762,10 +810,19 @@
         if (card && typeof card.setStatus === 'function') card.setStatus('done', 'ok');
         state.runningTools.delete(id);
       }
-      if (anchor && anchor.parentNode === tl) {
-        for (const node of Array.from(tl.childNodes)) {
-          if (!existing.has(node)) tl.insertBefore(node, anchor);
-        }
+      // Older events are appended while they render; move every new node above
+      // the previously oldest message.  If that anchor vanished (a concurrent
+      // reset, or the control moved), fall back to the top instead of leaving
+      // the older page appended at the bottom — which looked like the chat
+      // "rolling back" to an old release turn.
+      const added = Array.from(tl.childNodes).filter((node) => !existing.has(node));
+      let target = anchor && anchor.parentNode === tl ? anchor : null;
+      if (!target) {
+        target = control && control.parentNode === tl ? control.nextSibling : tl.firstChild;
+      }
+      for (const node of added) {
+        if (target && target.parentNode === tl) tl.insertBefore(node, target);
+        else tl.insertBefore(node, tl.firstChild);
       }
       const oldest = oldestEventSeq(events);
       if (oldest && oldest < before) {
@@ -884,8 +941,19 @@
   function handleFrame(frame) {
     switch (frame.t) {
       case 'hello': handleHello(frame); break;
-      case 'event': applyEvent(frame); markReadSoon(); scheduleNotify(); break;
-      case 'delta': applyDelta(frame); break;
+      case 'event':
+        try { applyEvent(frame); } catch (error) {
+          console.error('opencloddie: failed to render live chat event',
+            frame && frame.seq, frame && frame.kind, error);
+        }
+        markReadSoon();
+        scheduleNotify();
+        break;
+      case 'delta':
+        try { applyDelta(frame); } catch (error) {
+          console.error('opencloddie: failed to render chat delta', error);
+        }
+        break;
       case 'state': {
         const next = normalizeChat(frame.chat);
         setChat(next);
@@ -896,8 +964,16 @@
         if (frame.rewind && typeof frame.rewind === 'object') handleRewind(frame.rewind);
         break;
       }
-      case 'permission': addPermission(frame.permission); break;
-      case 'permission_resolved': resolvePermission(frame.id, frame.status, frame.decision); break;
+      case 'permission':
+        try { addPermission(frame.permission); } catch (error) {
+          console.error('opencloddie: failed to render live permission', frame.permission, error);
+        }
+        break;
+      case 'permission_resolved':
+        try { resolvePermission(frame.id, frame.status, frame.decision); } catch (error) {
+          console.error('opencloddie: failed to resolve permission', frame && frame.id, error);
+        }
+        break;
       case 'mode': handleMode(frame); break;
       case 'input': handleInputEcho(frame); break;
       case 'error': handleError(frame); break;
@@ -915,9 +991,31 @@
       }
     }
     const events = Array.isArray(frame.events) ? frame.events : [];
-    for (const event of events) applyEvent(event, { historical: true });
+    // The snapshot already covers everything through state.lastSeq.  A hello
+    // replay that includes an older page (seen after runner/socket restarts)
+    // must not be appended below the newest messages, which made a refresh
+    // look like it had rolled back to an old release turn.
+    const loadedLast = state.lastSeq;
+    for (const event of events) {
+      const seq = Number(event && event.seq) || 0;
+      if (state.loaded && seq && seq <= loadedLast) continue;
+      try {
+        applyEvent(event, { historical: true });
+      } catch (error) {
+        console.error(
+          'opencloddie: failed to render replay event',
+          event && event.seq,
+          event && event.kind,
+          error,
+        );
+      }
+    }
     for (const permission of Array.isArray(frame.pending) ? frame.pending : []) {
-      addPermission(permission, { reveal: false });
+      try {
+        addPermission(permission, { reveal: false });
+      } catch (error) {
+        console.error('opencloddie: failed to render replayed permission', permission, error);
+      }
     }
     state.lastSeq = Math.max(state.lastSeq, Number(frame.last_seq) || 0);
     if (events.length && !state.oldestSeq) {
@@ -926,6 +1024,8 @@
       updateOlderControl();
     }
     finalizeSnapshot();
+    updateJumpButton();
+    syncPending();
     renderHeader();
     syncComposer();
     scheduleNotify();
@@ -1086,6 +1186,19 @@
     if (!group) return;
     group.finalBlocks.add(blockIndex);
     const type = block.type;
+    const blockText = type === 'text'
+      ? String(block.text || '')
+      : (type === 'thinking' || type === 'redacted_thinking')
+        ? String(block.thinking || block.text || '')
+        : '';
+    // A replayed/final event can repeat the last text/thinking block verbatim;
+    // rendering it again is what made whole paragraphs appear twice.
+    if (blockText && group.lastBlock && group.lastBlock.type === type
+      && group.lastBlock.text === blockText) {
+      return;
+    }
+    if (blockText) group.lastBlock = { type, text: blockText };
+    else group.lastBlock = null;
     if (type === 'text') {
       const text = block.text || '';
       const streamed = takeStream(group.key, blockIndex, 'text');
@@ -1128,9 +1241,14 @@
     for (const group of state.groups.values()) {
       if (!messageId || group.messageId === messageId) group.finalized = true;
     }
-    for (const entry of state.streams.values()) {
+    for (const [key, entry] of Array.from(state.streams.entries())) {
       const parts = entry.groupKey.split('|');
-      if (!messageId || parts[parts.length - 1] === messageId) entry.controller.removeCursor();
+      if (messageId && parts[parts.length - 1] !== messageId) continue;
+      // Any stream not consumed by a final block is stale.  Leaving it in the
+      // DOM duplicates the finalized text/thinking; dispose it at message end.
+      try { entry.controller.removeCursor(); } catch (_) { /* ignore */ }
+      try { entry.controller.dispose(); } catch (_) { /* ignore */ }
+      state.streams.delete(key);
     }
   }
 
@@ -2477,6 +2595,89 @@
   }
 
   /* ---------------------------------------------------------------- timers */
+  /* Reconcile approvals from the server when a live frame was missed.  The
+     modal can always fetch them, but the transcript should show the inline
+     card too. */
+  function syncPending() {
+    if (!state.visible || document.hidden || !state.loaded || !state.session) return;
+    const fromSession = Number(state.session.chat && state.session.chat.pending) || 0;
+    const fromChat = Number(state.chat && state.chat.pending_count) || 0;
+    const want = Math.max(fromSession, fromChat);
+    if (want <= pendingCount()) return;
+    if (state.pendingFetch && Date.now() - state.pendingFetch < 5000) return;
+    state.pendingFetch = Date.now();
+    const sessionId = state.sessionId;
+    state.deps.api(`/api/sessions/${encodeURIComponent(sessionId)}/chat?limit=1`)
+      .then((data) => {
+        if (state.sessionId !== sessionId) return;
+        if (data && data.chat) {
+          setChat(data.chat);
+          if (state.session && state.session.chat) {
+            state.session.chat.pending = Number(data.chat.pending_count) || 0;
+          }
+        }
+        const pending = Array.isArray(data && data.pending) ? data.pending : [];
+        for (const permission of pending) {
+          const id = String(permission && (permission.id || permission.permission_id) || '');
+          if (!id || state.permissionCards.has(id)) continue;
+          try {
+            addPermission(permission, { reveal: state.pinned, track: true });
+          } catch (error) {
+            console.error('opencloddie: failed to render synced permission', permission, error);
+          }
+        }
+        renderHeader();
+        syncComposer();
+        scheduleNotify();
+        updateJumpButton();
+      })
+      .catch(() => { /* the modal and the next poll will retry */ });
+  }
+
+  function lastUserElement() {
+    const timelineEl = timeline();
+    if (timelineEl) {
+      const users = timelineEl.querySelectorAll('.chat-msg.chat-user');
+      if (users.length) return users[users.length - 1];
+    }
+    return state.lastUser && state.lastUser.el && state.lastUser.el.isConnected
+      ? state.lastUser.el
+      : null;
+  }
+
+  function updateJumpButton() {
+    const button = node('chat-jump-user');
+    if (!button) return;
+    const last = lastUserElement();
+    if (!state.visible || !last) {
+      button.hidden = true;
+      return;
+    }
+    const timelineEl = timeline();
+    if (!timelineEl) {
+      button.hidden = true;
+      return;
+    }
+    const rect = last.getBoundingClientRect();
+    const area = timelineEl.getBoundingClientRect();
+    button.hidden = !(rect.bottom < area.top || rect.top > area.bottom);
+  }
+
+  function jumpToLastUser() {
+    const last = lastUserElement();
+    if (!last) return;
+    // This is an explicit navigation gesture; the resulting scroll events must
+    // not be reclassified as restoration and re-pinned to the bottom.
+    state.userScrolled = true;
+    state.pinned = false;
+    // Instant, not smooth: a long transcript can take too long to animate and
+    // the reader can end up somewhere other than their message.
+    try { last.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {
+      try { last.scrollIntoView(); } catch (_) { /* ignore */ }
+    }
+    updateJumpButton();
+  }
+
   function startTick() {
     stopTick();
     state.tickTimer = setInterval(() => {
@@ -2485,6 +2686,8 @@
         if (!state.pending.has(id)) continue;
         try { card.tick(); } catch (_) { /* ignore */ }
       }
+      syncPending();
+      updateJumpButton();
     }, 1000);
   }
 
@@ -2518,15 +2721,31 @@
     if (send) send.addEventListener('click', sendMessage);
     const stop = node('chat-stop');
     if (stop) stop.addEventListener('click', stopTurn);
+    const jump = node('chat-jump-user');
+    if (jump) jump.addEventListener('click', jumpToLastUser);
     const tl = timeline();
     if (tl) {
       tl.addEventListener('scroll', () => {
-        state.pinned = state.programmaticScroll ? true : isNearBottom();
-        // Pull older pages as the reader approaches the top.
-        if (tl.scrollTop < 120 && state.hasOlder && !state.loadingOlder && !state.loading) {
+        // Before the reader has actually gestured, a scroll here is browser
+        // scroll restoration or layout settling; keep treating it as pinned
+        // so the delayed re-pin can land on the newest message.
+        state.pinned = state.programmaticScroll
+          ? true
+          : (state.userScrolled ? isNearBottom() : true);
+        // Pull older pages only after a real reader gesture.  A reload can
+        // restore the scroll container to the top; auto-paging there used to
+        // prepend an older 500-event page and make the view "roll back".
+        if (state.userScrolled && tl.scrollTop < 120 && state.hasOlder
+          && !state.loadingOlder && !state.loading) {
           loadOlder();
         }
+        updateJumpButton();
       }, { passive: true });
+      const markScrolled = () => { state.userScrolled = true; };
+      tl.addEventListener('wheel', markScrolled, { passive: true });
+      tl.addEventListener('touchmove', markScrolled, { passive: true });
+      tl.addEventListener('pointerdown', markScrolled, { passive: true });
+      tl.addEventListener('keydown', markScrolled);
       // Markdown, tool cards, images, fonts and the composer can all change
       // layout after the first scroll-to-bottom.  While the reader is pinned,
       // keep the newest message visible instead of stranding them above it.
@@ -2552,12 +2771,20 @@
       // fact; restore the bottom if the reader was pinned there.
       setTimeout(() => { if (state.pinned) scrollIfPinned(); }, 80);
     }, { passive: true });
+    window.addEventListener('pageshow', () => {
+      if (!state.visible) return;
+      setTimeout(() => {
+        if (state.pinned) scrollToBottom(true);
+        updateJumpButton();
+      }, 0);
+    });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { stopTick(); return; }
       if (!state.visible) return;
       startTick();
       if (!state.ws && !state.connecting && !state.loading) connect(state.lastSeq);
       markReadSoon();
+      updateJumpButton();
     });
   }
 

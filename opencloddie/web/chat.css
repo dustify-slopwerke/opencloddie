@@ -565,6 +565,17 @@
   color: var(--text); font: 12px/1.45 var(--mono);
 }
 .chat-perm-modal-note { color: var(--muted); font-size: 11.5px; margin: 0; }
+.chat-jump-user {
+  position: absolute; right: 14px; bottom: 88px; z-index: 8;
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 7px 12px; font-size: 12px; cursor: pointer;
+  color: var(--text); background: rgba(16, 21, 28, .96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+}
+.chat-jump-user:hover { border-color: var(--accent); }
+@media (max-width: 520px) {
+  .chat-jump-user { right: 10px; bottom: 76px; font-size: 11.5px; }
+}
 .chat-perm-decision-msg { color: var(--muted); }
 
 /* AskUserQuestion forms */
