@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -447,7 +447,7 @@ def claude_transcript_exists(cwd: str, session_id: str) -> bool:
 CHAT_MIN_CLAUDE_VERSION = "2.1.300"
 CHAT_DEFAULT_MAX_EVENT_BYTES = 256 * 1024
 CHAT_DEFAULT_MAX_TOOL_RESULT_BYTES = 64 * 1024
-CHAT_DEFAULT_PERMISSION_TIMEOUT = 300
+CHAT_DEFAULT_PERMISSION_TIMEOUT = 3600
 
 
 def chat_paths(session_id: str) -> dict[str, str]:

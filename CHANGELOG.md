@@ -6,6 +6,28 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-27
+
+### Fixed
+
+- Reloading a chat (including a hard reload) keeps the newest messages in
+  view.  Snapshot and reconnect events now render as history instead of running
+  live-only side effects, so an old, already-resolved approval card can no
+  longer smooth-scroll the timeline far above the newest turn.  The transcript
+  also re-pins while images, fonts, markdown and tool cards finish laying out.
+- The pending-approval badge no longer sticks at "1 pending" with nothing to
+  click after an approval resolves or expires.  Only live, unresolved requests
+  are counted, expired cards are not focused, and the header trusts the pending
+  set loaded from the snapshot instead of a stale `pending_count`.
+- The transcript keeps its scroll position when switching between sessions and
+  back, including any "Load earlier messages" pages already rendered.
+
+### Changed
+
+- The default `chat.permission_timeout_seconds` is now **3600** (one hour)
+  instead of 300, so an approval does not auto-deny while it is being read on a
+  phone.  Set it explicitly for a shorter window.
+
 ## [0.6.5] - 2026-11-27
 
 ### Fixed

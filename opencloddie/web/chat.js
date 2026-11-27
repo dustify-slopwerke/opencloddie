@@ -311,15 +311,29 @@
     });
   }
 
+  function isExpiredPermission(permission) {
+    if (!permission || !permission.expires_at) return false;
+    const expires = Date.parse(permission.expires_at);
+    return Number.isFinite(expires) && expires <= Date.now();
+  }
+
   function pendingCount() {
-    const local = state.pending.size;
+    let local = 0;
+    for (const permission of state.pending.values()) {
+      if (!isExpiredPermission(permission)) local += 1;
+    }
+    // Once the snapshot is loaded, the local set is complete: it is seeded
+    // from the server's pending list and kept current by permission frames.
+    // Trusting a stale chat.pending_count here left "1 pending" showing after
+    // an approval (or timeout) had already resolved, with nothing to click.
+    if (state.loaded) return local;
     const server = state.chat ? Number(state.chat.pending_count) : 0;
     return Math.max(local, Number.isFinite(server) ? server : 0);
   }
 
   function focusPending() {
     for (const [id, card] of state.permissionCards) {
-      if (!state.pending.has(id)) continue;
+      if (!state.pending.has(id) || isExpiredPermission(state.pending.get(id))) continue;
       try { card.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { /* ignore */ }
       card.el.classList.add('is-flash');
       setTimeout(() => card.el.classList.remove('is-flash'), 1400);
@@ -616,8 +630,12 @@
     state.loaded = true;
     setChat(data.chat);
     const events = Array.isArray(data.events) ? data.events : [];
-    for (const event of events) applyEvent(event);
-    for (const permission of Array.isArray(data.pending) ? data.pending : []) addPermission(permission);
+    // Snapshot events are history: render them, but do not run live-only side
+    // effects (revealing old approvals, toast/suggestion/status mutations).
+    for (const event of events) applyEvent(event, { historical: true });
+    for (const permission of Array.isArray(data.pending) ? data.pending : []) {
+      addPermission(permission, { reveal: false });
+    }
     state.lastSeq = Math.max(state.lastSeq, Number(data.last_seq) || 0);
     state.oldestSeq = oldestEventSeq(events);
     state.hasOlder = Boolean(data.has_more) && state.oldestSeq > 0;
@@ -876,8 +894,10 @@
       }
     }
     const events = Array.isArray(frame.events) ? frame.events : [];
-    for (const event of events) applyEvent(event);
-    for (const permission of Array.isArray(frame.pending) ? frame.pending : []) addPermission(permission);
+    for (const event of events) applyEvent(event, { historical: true });
+    for (const permission of Array.isArray(frame.pending) ? frame.pending : []) {
+      addPermission(permission, { reveal: false });
+    }
     state.lastSeq = Math.max(state.lastSeq, Number(frame.last_seq) || 0);
     if (events.length && !state.oldestSeq) {
       state.oldestSeq = oldestEventSeq(events);
@@ -988,10 +1008,12 @@
         if (!historical) setSuggestion(payload && payload.suggestion);
         break;
       case 'permission':
-        if (!historical) addPermission(payload);
+        // Replayed history still needs its approval cards, but an old card
+        // must never yank the timeline away from the newest messages.
+        addPermission(payload, { reveal: !historical, track: !historical });
         break;
       case 'permission_resolved':
-        if (!historical) resolvePermission(payload.permission_id || payload.id, payload.status, payload.decision);
+        resolvePermission(payload.permission_id || payload.id, payload.status, payload.decision);
         break;
       case 'handoff':
         appendTimeline(window.ChatRender.statusRow(
@@ -1264,12 +1286,18 @@
   }
 
   /* ----------------------------------------------------------- permissions */
-  function addPermission(permission) {
+  function addPermission(permission, options) {
     const perm = permission && typeof permission === 'object' ? permission : {};
     const id = String(perm.id || perm.permission_id || '');
     if (!id) return;
+    const opts = options && typeof options === 'object' ? options : {};
+    const track = opts.track !== false;
+    const reveal = opts.reveal !== false;
     const normalized = Object.assign({}, perm, { id });
-    state.pending.set(id, normalized);
+    // Only a live, unresolved request belongs in the pending set.  Historical
+    // cards that already have a resolution must not inflate the pending badge.
+    const status = String(normalized.status || '').toLowerCase();
+    if (track && (!status || status === 'pending')) state.pending.set(id, normalized);
     const existing = state.permissionCards.get(id);
     if (existing) {
       if (perm.expires_at) existing.setExpiry(perm.expires_at);
@@ -1284,10 +1312,12 @@
     renderHeader();
     syncComposer();
     scheduleNotify();
-    // On mobile the card can land below the fold.  Reveal a newly arrived
-    // approval instead of making the user hunt for it.
-    if (state.visible && !document.hidden) {
+    // On mobile a newly arrived approval can land below the fold.  Reveal it,
+    // but never for replayed history and never if it was resolved in the same
+    // batch (which used to leave reloads scrolled far above the newest turn).
+    if (reveal && track && state.visible && !document.hidden) {
       requestAnimationFrame(() => {
+        if (!state.pending.has(id) || !state.visible || document.hidden) return;
         try { card.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { /* ignore */ }
         card.el.classList.add('is-flash');
         setTimeout(() => card.el.classList.remove('is-flash'), 1400);
@@ -2469,6 +2499,24 @@
           loadOlder();
         }
       }, { passive: true });
+      // Markdown, tool cards, images, fonts and the composer can all change
+      // layout after the first scroll-to-bottom.  While the reader is pinned,
+      // keep the newest message visible instead of stranding them above it.
+      if (window.MutationObserver) {
+        const observer = new MutationObserver(() => {
+          if (state.pinned && state.visible) scrollIfPinned();
+        });
+        observer.observe(tl, { childList: true, subtree: true, characterData: true });
+        state.timelineObserver = observer;
+      }
+      tl.addEventListener('load', () => {
+        if (state.pinned && state.visible) scrollIfPinned();
+      }, true);
+      if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+        document.fonts.ready
+          .then(() => { if (state.pinned && state.visible) scrollIfPinned(); })
+          .catch(() => {});
+      }
     }
     window.addEventListener('resize', () => {
       if (state.search.open) positionSearchPanel();

@@ -93,7 +93,7 @@
     "max_image_bytes": 5242880,
     "max_input_images": 4,
     "max_inline_event_image_bytes": 1048576,
-    "permission_timeout_seconds": 300,
+    "permission_timeout_seconds": 3600,
     "permission_mode": "",
     "auto_restart": true,
     "store_tool_outputs": true,

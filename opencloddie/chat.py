@@ -70,7 +70,7 @@ class ChatBroker:
         self.max_inline_event_image_bytes = int(
             cfg.get("max_inline_event_image_bytes") or 1 * 1024 * 1024
         )
-        self.permission_timeout = int(cfg.get("permission_timeout_seconds") or 300)
+        self.permission_timeout = int(cfg.get("permission_timeout_seconds") or 3600)
         self._lock = threading.RLock()
         self._viewers: dict[str, dict[int, queue.Queue]] = {}
         self._viewer_ids = itertools.count(1)

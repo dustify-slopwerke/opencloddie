@@ -97,7 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Transcript events keep an image inline (as a data: URL) up to this
         # decoded size; larger ones become a placeholder block.
         "max_inline_event_image_bytes": 1 * 1024 * 1024,
-        "permission_timeout_seconds": 300,
+        "permission_timeout_seconds": 3600,
         "auto_restart": True,
         "store_tool_outputs": True,
         # Empty = defer to Claude Code's permissions.defaultMode (the same
@@ -275,7 +275,7 @@ def _validate(cfg: dict[str, Any]) -> None:
         "max_image_bytes": (5 * 1024 * 1024, 1024, 32 * 1024 * 1024),
         "max_input_images": (4, 0, 16),
         "max_inline_event_image_bytes": (1 * 1024 * 1024, 0, 8 * 1024 * 1024),
-        "permission_timeout_seconds": (300, 10, 86400),
+        "permission_timeout_seconds": (3600, 10, 86400),
     }
     for key, (default, low, high) in chat_numeric.items():
         try:

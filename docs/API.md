@@ -116,7 +116,7 @@ The client's bootstrap endpoint.
   "messages_enabled": true,
   "features": {"chat": true},
   "chat": {"max_event_bytes": 262144, "max_tool_result_bytes": 65536,
-           "permission_timeout_seconds": 300, "min_claude_version": "2.1.300"},
+           "permission_timeout_seconds": 3600, "min_claude_version": "2.1.300"},
   "gateway_base_url": "https://cloddie.example.com",
   "web_url": "https://cloddie.example.com",
   "install": {"command": "curl -fsSL .../install/opencloddie ..."}
