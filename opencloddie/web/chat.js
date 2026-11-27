@@ -1166,8 +1166,27 @@
     scrollIfPinned();
   }
 
+  const INTERNAL_CHAT_PREFIXES = [
+    '[handback-send-enforce]',
+    '[subagent-handback]',
+    '[task-notification]',
+  ];
+
+  function isInternalChatContent(content) {
+    const text = window.ChatRender && typeof window.ChatRender.contentText === 'function'
+      ? window.ChatRender.contentText(content)
+      : (typeof content === 'string' ? content : '');
+    const trimmed = String(text || '').trim();
+    return Boolean(trimmed)
+      && INTERNAL_CHAT_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  }
+
   function handleUserMessage(payload, historical) {
     const content = payload.content;
+    // Harness/subagent instructions can be injected into the model as user
+    // turns.  They are not the reader's messages and must not appear in the
+    // transcript (or become the "your last message" target).
+    if (isInternalChatContent(content)) return;
     const text = window.ChatRender.contentText(content);
     const optimistic = historical ? null : takeOptimistic(text);
     let el = optimistic && optimistic.el ? optimistic.el : null;
@@ -1741,6 +1760,7 @@
     input.style.height = 'auto';
     const height = Math.min(160, Math.max(38, input.scrollHeight));
     input.style.height = `${height}px`;
+    updateJumpButton();
   }
 
   function sendViaRest(content, clientMsgId) {
@@ -2483,6 +2503,7 @@
   /* ---------------------------------------------------------- checkpoints */
   function handleCheckpoint(payload, seq) {
     const data = payload && typeof payload === 'object' ? payload : {};
+    if (isInternalChatContent(String(data.label || ''))) return;
     const uuid = String(data.uuid || data.checkpoint_uuid || '');
     if (!uuid) return;
     const rec = {
@@ -2694,21 +2715,27 @@
   }
 
   function updateJumpButton() {
-    const button = node('chat-jump-user');
-    if (!button) return;
-    const last = lastUserElement();
-    if (!state.visible || !last) {
-      button.hidden = true;
-      return;
-    }
+    const controls = node('chat-jump-controls');
+    const userButton = node('chat-jump-user');
+    const bottomButton = node('chat-jump-bottom');
+    if (!controls || !userButton || !bottomButton) return;
+    // Sit immediately above the composer, using its real height so a grown
+    // textarea can never cover the controls.
+    const composer = node('chat-composer');
+    const composerHeight = composer ? composer.getBoundingClientRect().height : 76;
+    controls.style.bottom = `${Math.ceil(composerHeight) + 12}px`;
     const timelineEl = timeline();
-    if (!timelineEl) {
-      button.hidden = true;
-      return;
+    const last = lastUserElement();
+    let userOff = false;
+    if (state.visible && last && timelineEl) {
+      const rect = last.getBoundingClientRect();
+      const area = timelineEl.getBoundingClientRect();
+      userOff = rect.bottom < area.top || rect.top > area.bottom;
     }
-    const rect = last.getBoundingClientRect();
-    const area = timelineEl.getBoundingClientRect();
-    button.hidden = !(rect.bottom < area.top || rect.top > area.bottom);
+    userButton.hidden = !(state.visible && userOff);
+    bottomButton.hidden = !(state.visible && !state.pinned && timelineEl
+      && timelineEl.scrollHeight > timelineEl.clientHeight + 4);
+    controls.hidden = userButton.hidden && bottomButton.hidden;
   }
 
   function jumpToLastUser() {
@@ -2723,6 +2750,13 @@
     try { last.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (_) {
       try { last.scrollIntoView(); } catch (_) { /* ignore */ }
     }
+    updateJumpButton();
+  }
+
+  function jumpToBottom() {
+    state.userScrolled = true;
+    state.pinned = true;
+    scrollToBottom(true);
     updateJumpButton();
   }
 
@@ -2769,8 +2803,10 @@
     if (send) send.addEventListener('click', sendMessage);
     const stop = node('chat-stop');
     if (stop) stop.addEventListener('click', stopTurn);
-    const jump = node('chat-jump-user');
-    if (jump) jump.addEventListener('click', jumpToLastUser);
+    const jumpUser = node('chat-jump-user');
+    if (jumpUser) jumpUser.addEventListener('click', jumpToLastUser);
+    const jumpBottom = node('chat-jump-bottom');
+    if (jumpBottom) jumpBottom.addEventListener('click', jumpToBottom);
     const tl = timeline();
     if (tl) {
       tl.addEventListener('scroll', () => {
@@ -2818,6 +2854,7 @@
       // Mobile keyboards and rotating screens change the viewport after the
       // fact; restore the bottom if the reader was pinned there.
       setTimeout(() => { if (state.pinned) scrollIfPinned(); }, 80);
+      updateJumpButton();
     }, { passive: true });
     window.addEventListener('pageshow', () => {
       if (!state.visible) return;

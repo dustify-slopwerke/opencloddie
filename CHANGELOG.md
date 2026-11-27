@@ -6,6 +6,22 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-11-27
+
+### Fixed
+
+- Harness/subagent instruction messages (for example
+  `[handback-send-enforce] ...`) are no longer rendered as the reader's chat
+  messages or used by the "Your last message" jump.  The chat runner also stops
+  persisting these future internal messages in the user transcript.
+- The jump controls now sit above the composer using its measured height, so
+  they no longer overlap the text box when the textarea grows.
+
+### Added
+
+- A "↓ Jump to bottom" control appears when the reader has scrolled up, and
+  returns to the newest message.
+
 ## [0.6.10] - 2026-11-27
 
 ### Fixed

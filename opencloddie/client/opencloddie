@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -448,6 +448,17 @@ CHAT_MIN_CLAUDE_VERSION = "2.1.300"
 CHAT_DEFAULT_MAX_EVENT_BYTES = 256 * 1024
 CHAT_DEFAULT_MAX_TOOL_RESULT_BYTES = 64 * 1024
 CHAT_DEFAULT_PERMISSION_TIMEOUT = 3600
+INTERNAL_CHAT_PREFIXES = (
+    "[handback-send-enforce]",
+    "[subagent-handback]",
+    "[task-notification]",
+)
+
+
+def is_internal_chat_text(text: str) -> bool:
+    """Harness/subagent instructions are model input, not user transcript."""
+    value = str(text or "").lstrip()
+    return bool(value) and value.startswith(INTERNAL_CHAT_PREFIXES)
 
 
 def chat_paths(session_id: str) -> dict[str, str]:
@@ -5046,6 +5057,10 @@ class ChatRunner:
                 text = block.get("text") or ""
             else:
                 text = block if isinstance(block, str) else ""
+            if is_internal_chat_text(text):
+                # The model may receive harness/subagent instructions as user
+                # turns; keep them out of the user-visible transcript.
+                continue
             if is_replay:
                 # The durable user_message was written when input arrived.
                 # Replay UUIDs are file checkpoints; record the first one of
