@@ -1391,9 +1391,22 @@
   }
 
   function takeStream(groupKey, blockIndex, kind) {
-    const key = `${groupKey}|${blockIndex}|${kind}`;
+    const exact = `${groupKey}|${blockIndex}|${kind}`;
+    let key = state.streams.has(exact) ? exact : null;
+    if (!key) {
+      // The runner can report a final block with block_index 0 even when the
+      // deltas used the real content index (thinking=0, text=1, tool=2).
+      // Consume the oldest unconsumed stream of this kind for the message so
+      // the final block replaces it instead of appending a duplicate.
+      for (const [candidate, entry] of state.streams) {
+        if (entry.groupKey === groupKey && candidate.endsWith(`|${kind}`)) {
+          key = candidate;
+          break;
+        }
+      }
+    }
+    if (!key) return null;
     const entry = state.streams.get(key);
-    if (!entry) return null;
     state.streams.delete(key);
     return entry.controller;
   }
@@ -2198,7 +2211,10 @@
       'aria-hidden': 'true',
     });
     fileInput.addEventListener('change', () => {
-      const files = fileInput.files;
+      // Snapshot the FileList before clearing the input: the live FileList
+      // becomes empty when value is reset, which made mobile selections do
+      // nothing.
+      const files = Array.from(fileInput.files || []);
       fileInput.value = '';
       addImageFiles(files);
     });

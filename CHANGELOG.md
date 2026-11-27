@@ -6,6 +6,19 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-11-27
+
+### Fixed
+
+- Duplicate assistant text when the CLI reports final blocks with
+  `block_index: 0` but the streamed deltas use the real content index
+  (thinking=0, text=1, tool=2).  A final block now consumes the oldest
+  unconsumed stream of its kind for the message, and the runner tracks a
+  per-message block index so future events match their deltas.
+- Mobile image attachments: the file input is cleared after the selection is
+  snapshotted, so choosing photos now adds them to the attachment tray instead
+  of silently doing nothing.
+
 ## [0.6.12] - 2026-11-27
 
 ### Changed

@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.12"
+VERSION = "0.6.13"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -3546,6 +3546,8 @@ class ChatRunner:
         self.turn_checkpointed = False
         self.turn_aborted = False
         self.current_message_id = ""
+        self._assistant_block_message = ""
+        self._assistant_block_index = 0
         self._message_stop_reason = ""
         self._message_usage: dict = {}
         self._interrupt_error_emitted = False
@@ -5001,6 +5003,14 @@ class ChatRunner:
         message_id = str(message.get("id") or "")
         if message_id:
             self.current_message_id = message_id
+            # The CLI can emit one assistant event per content block, each with
+            # a one-item content list.  Enumerating that list gives every block
+            # index 0, which prevents the web UI from matching a final block to
+            # its streamed text (the stream uses the real content index).  Keep
+            # a counter per message so the final indices match the deltas.
+            if message_id != self._assistant_block_message:
+                self._assistant_block_message = message_id
+                self._assistant_block_index = 0
         usage = message.get("usage")
         if isinstance(usage, dict):
             self._message_usage = usage
@@ -5009,7 +5019,12 @@ class ChatRunner:
         content = message.get("content")
         if not isinstance(content, list):
             content = []
-        for index, block in enumerate(content):
+        for fallback_index, block in enumerate(content):
+            if message_id:
+                index = self._assistant_block_index
+                self._assistant_block_index += 1
+            else:
+                index = fallback_index
             self._emit(
                 "assistant_block",
                 {
