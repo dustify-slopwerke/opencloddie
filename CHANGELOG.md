@@ -6,6 +6,15 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-11-27
+
+### Changed
+
+- The "↑ Last msg" and "↓ Latest" jump controls now live in the chat header,
+  to the right of the status and "Clear history", instead of floating above the
+  composer.  They keep their conditional visibility and can no longer overlap
+  the text box.
+
 ## [0.6.11] - 2026-11-27
 
 ### Fixed

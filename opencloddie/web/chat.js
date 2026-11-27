@@ -1688,7 +1688,28 @@
         onclick: clearHistory,
       }));
     }
+    right.append(
+      deps.h('button', {
+        id: 'chat-jump-user',
+        class: 'chat-jump-head',
+        type: 'button',
+        hidden: true,
+        title: 'Jump to your last message',
+        text: '↑ Last msg',
+        onclick: jumpToLastUser,
+      }),
+      deps.h('button', {
+        id: 'chat-jump-bottom',
+        class: 'chat-jump-head',
+        type: 'button',
+        hidden: true,
+        title: 'Jump to the newest message',
+        text: '↓ Latest',
+        onclick: jumpToBottom,
+      }),
+    );
     root.append(left, right);
+    updateJumpButton();
     syncCheckpointActions();
     if (state.search.open) positionSearchPanel();
   }
@@ -2715,15 +2736,9 @@
   }
 
   function updateJumpButton() {
-    const controls = node('chat-jump-controls');
     const userButton = node('chat-jump-user');
     const bottomButton = node('chat-jump-bottom');
-    if (!controls || !userButton || !bottomButton) return;
-    // Sit immediately above the composer, using its real height so a grown
-    // textarea can never cover the controls.
-    const composer = node('chat-composer');
-    const composerHeight = composer ? composer.getBoundingClientRect().height : 76;
-    controls.style.bottom = `${Math.ceil(composerHeight) + 12}px`;
+    if (!userButton || !bottomButton) return;
     const timelineEl = timeline();
     const last = lastUserElement();
     let userOff = false;
@@ -2735,7 +2750,6 @@
     userButton.hidden = !(state.visible && userOff);
     bottomButton.hidden = !(state.visible && !state.pinned && timelineEl
       && timelineEl.scrollHeight > timelineEl.clientHeight + 4);
-    controls.hidden = userButton.hidden && bottomButton.hidden;
   }
 
   function jumpToLastUser() {
@@ -2803,10 +2817,6 @@
     if (send) send.addEventListener('click', sendMessage);
     const stop = node('chat-stop');
     if (stop) stop.addEventListener('click', stopTurn);
-    const jumpUser = node('chat-jump-user');
-    if (jumpUser) jumpUser.addEventListener('click', jumpToLastUser);
-    const jumpBottom = node('chat-jump-bottom');
-    if (jumpBottom) jumpBottom.addEventListener('click', jumpToBottom);
     const tl = timeline();
     if (tl) {
       tl.addEventListener('scroll', () => {
