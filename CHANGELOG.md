@@ -6,6 +6,20 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-11-27
+
+### Fixed
+
+- Tapping the "N pending" chip now always opens the approval modal.  It
+  previously only scrolled to and flashed the inline card; if that card was
+  taller than a phone viewport, or had already resolved, the buttons were
+  unreachable and all the user saw was the flash outline.  The modal reuses the
+  full card (including `AskUserQuestion` and plan approval) and posts the
+  decision over REST, so it still works if the chat WebSocket is down.
+- A newly arrived approval now reveals its action row (`Allow once` / `Deny`)
+  rather than the middle of a potentially tall card, so the buttons are visible
+  even when the inline card is used.
+
 ## [0.6.6] - 2026-11-27
 
 ### Fixed

@@ -342,23 +342,83 @@
     return false;
   }
 
+  function firstPendingPermission() {
+    for (const permission of state.pending.values()) {
+      if (!isExpiredPermission(permission)) return permission;
+    }
+    return null;
+  }
+
   function reviewPending() {
-    if (focusPending()) return true;
-    // The server says an approval is pending but its card is not loaded (for
-    // example after a mobile reconnect or a backgrounded tab).  Refresh the
-    // snapshot, which replays pending permissions, then focus it.
-    if (state.session) loadSnapshot(state.session);
-    setTimeout(() => {
-      if (focusPending()) return;
-      pendingModal();
-    }, 700);
-    return false;
+    // Always open the modal.  Scrolling to the inline card is not a reliable
+    // way to answer on a phone: the card can be taller than the viewport,
+    // already resolved, or simply off-screen, leaving only a flash outline
+    // and no buttons.
+    pendingModal();
+    return true;
+  }
+
+  function showPermissionModal(p, queued) {
+    const sessionId = state.sessionId;
+    const deps = state.deps;
+    if (!sessionId || !deps || !p) return;
+    const decide = async (decision) => {
+      const payload = {
+        behavior: decision && decision.behavior === 'deny' ? 'deny' : 'allow',
+      };
+      if (decision && decision.updated_input !== undefined) {
+        payload.updated_input = decision.updated_input;
+      }
+      if (decision && decision.updated_permissions) {
+        payload.updated_permissions = decision.updated_permissions;
+      }
+      if (decision && decision.message) payload.message = decision.message;
+      try {
+        await deps.api(
+          `/api/sessions/${encodeURIComponent(sessionId)}/chat/permissions/${encodeURIComponent(p.id)}`,
+          { method: 'POST', body: payload },
+        );
+        resolvePermission(
+          p.id,
+          payload.behavior === 'deny' ? 'denied' : 'allowed',
+          payload,
+        );
+        if (deps.closeModal) deps.closeModal();
+        if (deps.toast) deps.toast(payload.behavior === 'allow' ? 'Approved' : 'Denied');
+        return true;
+      } catch (error) {
+        if (deps.toast) {
+          deps.toast(error && error.message ? error.message : 'Could not answer the request', 'error');
+        }
+        return false;
+      }
+    };
+    // Reuse the full card: it renders the AskUserQuestion form, plan
+    // approval, and the normal Allow/Deny controls in one place.
+    const card = window.ChatRender.permissionCard(p, { decide });
+    const wrap = deps.h('div', { class: 'chat-perm-modal-wrap' }, card.el);
+    if (Number(queued) > 1) {
+      wrap.append(deps.h('p', {
+        class: 'chat-perm-modal-note',
+        text: `${Number(queued) - 1} more approval(s) queued.`,
+      }));
+    }
+    deps.openModal({
+      title: 'Pending approval',
+      body: wrap,
+      dismissible: true,
+      actions: [],
+    });
   }
 
   function pendingModal() {
     const sessionId = state.sessionId;
     const deps = state.deps;
     if (!sessionId || !deps) return;
+    // Always ask the server which requests are actually pending.  A local
+    // card can be stale (resolved in another tab, or left over after a missed
+    // frame), and showing that one instead of the live request is exactly how
+    // the chip could flash a card with no working buttons.
     deps.api(`/api/sessions/${encodeURIComponent(sessionId)}/chat?limit=1`)
       .then((data) => {
         const pending = Array.isArray(data && data.pending) ? data.pending : [];
@@ -366,54 +426,15 @@
           if (deps.toast) deps.toast('No pending approvals');
           return;
         }
-        const p = pending[0];
-        const decide = async (decision) => {
-          const payload = {
-            behavior: decision && decision.behavior === 'deny' ? 'deny' : 'allow',
-          };
-          if (decision && decision.updated_input !== undefined) {
-            payload.updated_input = decision.updated_input;
-          }
-          if (decision && decision.updated_permissions) {
-            payload.updated_permissions = decision.updated_permissions;
-          }
-          if (decision && decision.message) payload.message = decision.message;
-          try {
-            await deps.api(
-              `/api/sessions/${encodeURIComponent(sessionId)}/chat/permissions/${encodeURIComponent(p.id)}`,
-              { method: 'POST', body: payload },
-            );
-            state.pending.delete(p.id);
-            renderHeader();
-            syncComposer();
-            if (deps.closeModal) deps.closeModal();
-            if (deps.toast) deps.toast(payload.behavior === 'allow' ? 'Approved' : 'Denied');
-            return true;
-          } catch (error) {
-            if (deps.toast) {
-              deps.toast(error && error.message ? error.message : 'Could not answer the request', 'error');
-            }
-            return false;
-          }
-        };
-        // Reuse the full card: it renders the AskUserQuestion form, plan
-        // approval, and the normal Allow/Deny controls in one place.
-        const card = window.ChatRender.permissionCard(p, { decide });
-        const wrap = deps.h('div', { class: 'chat-perm-modal-wrap' }, card.el);
-        if (pending.length > 1) {
-          wrap.append(deps.h('p', {
-            class: 'chat-perm-modal-note',
-            text: `${pending.length - 1} more approval(s) queued.`,
-          }));
-        }
-        deps.openModal({
-          title: 'Pending approval',
-          body: wrap,
-          dismissible: true,
-          actions: [],
-        });
+        showPermissionModal(pending[0], pending.length);
       })
       .catch((error) => {
+        // Offline: a local pending card is still better than nothing.
+        const local = firstPendingPermission();
+        if (local) {
+          showPermissionModal(local, pendingCount());
+          return;
+        }
         if (deps.toast) {
           deps.toast(error && error.message ? error.message : 'Could not load pending approvals', 'error');
         }
@@ -1318,7 +1339,14 @@
     if (reveal && track && state.visible && !document.hidden) {
       requestAnimationFrame(() => {
         if (!state.pending.has(id) || !state.visible || document.hidden) return;
-        try { card.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { /* ignore */ }
+        // Reveal the buttons, not the middle of a card that may be taller
+        // than the phone viewport.
+        const actions = card.el.querySelector(
+          '.chat-perm-actions, .chat-question-actions, .chat-perm-deny',
+        );
+        try {
+          (actions || card.el).scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (_) { /* ignore */ }
         card.el.classList.add('is-flash');
         setTimeout(() => card.el.classList.remove('is-flash'), 1400);
       });
