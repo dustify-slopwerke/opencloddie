@@ -44,6 +44,7 @@
     replaying: false,
     lastMarkedRead: 0,
     pendingFetch: 0,
+    resolvedPermissions: new Map(),
     userScrolled: false,
     streaming: false,
     pinned: true,
@@ -447,6 +448,7 @@
   function blankSessionState() {
     state.pending = new Map();
     state.permissionCards = new Map();
+    state.resolvedPermissions = new Map();
     state.groups = new Map();
     state.streams = new Map();
     state.toolCards = new Map();
@@ -1422,8 +1424,10 @@
   }
 
   /* ----------------------------------------------------------- permissions */
-  function reconcilePending(list) {
+  function reconcilePending(list, options) {
     if (!Array.isArray(list)) return;
+    const opts = options && typeof options === 'object' ? options : {};
+    const prune = opts.prune instanceof Set ? opts.prune : null;
     const ids = new Set();
     const incoming = [];
     for (const permission of list) {
@@ -1434,7 +1438,10 @@
     }
     // The authoritative list can be shorter than our local set when another
     // tab approved/denied, or a request expired while this socket was down.
+    // A REST fetch may have started before a new live request arrived; only
+    // prune ids that were already local when the fetch began.
     for (const id of Array.from(state.pending.keys())) {
+      if (prune && !prune.has(id)) continue;
       if (!ids.has(id)) resolvePermission(id, 'resolved', { message: 'No longer pending' });
     }
     for (const permission of incoming) {
@@ -1455,10 +1462,19 @@
     const reveal = opts.reveal !== false;
     const normalized = Object.assign({}, perm, { id });
     // Only a live, unresolved request belongs in the pending set.  Historical
-    // cards that already have a resolution must not inflate the pending badge.
+    // cards and requests resolved while a REST snapshot was in flight must not
+    // inflate the pending badge or revive a dead card.
     const status = String(normalized.status || '').toLowerCase();
-    if (track && (!status || status === 'pending')) state.pending.set(id, normalized);
     const existing = state.permissionCards.get(id);
+    const resolvedEntry = state.resolvedPermissions.get(id);
+    const resolvedCard = Boolean(existing && existing.el
+      && (existing.el.classList.contains('is-resolved')
+        || existing.el.classList.contains('is-expired')));
+    if (!resolvedEntry && !resolvedCard && track && (!status || status === 'pending')) {
+      state.pending.set(id, normalized);
+    } else {
+      state.pending.delete(id);
+    }
     if (existing) {
       if (perm.expires_at) existing.setExpiry(perm.expires_at);
       renderHeader();
@@ -1468,6 +1484,11 @@
       decide: (decision) => decidePermission(id, decision),
     });
     state.permissionCards.set(id, card);
+    if (resolvedEntry) {
+      try { card.resolve(resolvedEntry.status || 'resolved', resolvedEntry.decision); } catch (_) {
+        /* ignore */
+      }
+    }
     appendTimeline(card.el);
     renderHeader();
     syncComposer();
@@ -1524,6 +1545,7 @@
     const key = String(id || '');
     if (!key) return;
     state.pending.delete(key);
+    state.resolvedPermissions.set(key, { status: status || 'resolved', decision: decision || null });
     const card = state.permissionCards.get(key);
     if (card) card.resolve(status, decision);
     renderHeader();
@@ -2637,6 +2659,9 @@
     if (state.pendingFetch && Date.now() - state.pendingFetch < 5000) return;
     state.pendingFetch = Date.now();
     const sessionId = state.sessionId;
+    // Requests can arrive while this GET is in flight; their list is a snapshot
+    // from the start of the request, so only prune ids we already had.
+    const localBefore = new Set(state.pending.keys());
     state.deps.api(`/api/sessions/${encodeURIComponent(sessionId)}/chat?limit=1`)
       .then((data) => {
         if (state.sessionId !== sessionId) return;
@@ -2646,7 +2671,9 @@
             state.session.chat.pending = Number(data.chat.pending_count) || 0;
           }
         }
-        if (Array.isArray(data && data.pending)) reconcilePending(data.pending);
+        if (Array.isArray(data && data.pending)) {
+          reconcilePending(data.pending, { prune: localBefore });
+        }
         renderHeader();
         syncComposer();
         scheduleNotify();

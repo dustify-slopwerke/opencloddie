@@ -6,6 +6,16 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-11-27
+
+### Fixed
+
+- A REST pending-approval reconciliation that started before a new live
+  approval arrived no longer resolves that new request: pruning is limited to
+  ids that were already local when the fetch began.  A request resolved while
+  the fetch was in flight is not re-added as pending, and historical permission
+  cards still render with their known resolution.
+
 ## [0.6.9] - 2026-11-27
 
 ### Fixed
@@ -36,9 +46,9 @@ All notable changes to opencloddie are documented here.  The format follows
 - Reload and browser scroll restoration keep the view on the newest message.
   Auto-loading older history now requires an actual reader gesture, so a
   restored scroll position cannot page backwards on its own.
-- Streamed assistant text and thinking no longer appear twice: unconsumed
-  stream bubbles are disposed at message end, and adjacent identical blocks are
-  deduplicated.
+- Streamed assistant text and thinking are reconciled with the final assistant
+  blocks at message end, so they no longer appear twice.  (Refined in 0.6.9 to
+  follow the CLI's real event order.)
 - Pending approvals missed by the live chat socket are reconciled from the
   server, so the inline approval card appears without a reload.  The modal and
   the pending badge remain server-backed.
