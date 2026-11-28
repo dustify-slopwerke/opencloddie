@@ -6,6 +6,32 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-11-28
+
+### Fixed
+
+- Killing a session through the hub could leave its tmux session running.  The
+  agent closed the PTY master twice; a second `os.close()` could hit a file
+  descriptor number reused by the concurrent `tmux kill-session` subprocess,
+  fail with `EBADF`, and make the agent give up without killing tmux.  The PTY
+  close is now idempotent with fd locking, and `tmux_kill` retries and verifies
+  that the session is gone.
+- Duplicate assistant text is suppressed on three paths: a repeated final block
+  for the same message is rendered once, a final block whose text is already on
+  screen does not append a second copy, and the "Turn complete" row no longer
+  repeats the assistant's final message (it keeps the cost/token metadata).
+- Empty assistant groups and empty orphan subagent containers are pruned.  A
+  subagent stream whose parent Agent card is outside the loaded history no
+  longer leaves a thin empty strip in the timeline; emptied nested containers
+  inside tool cards are hidden again.
+
+### Changed
+
+- Chat code is collapsed by default behind a "language · N lines" header and
+  can be expanded individually.  Fenced Markdown code, long Bash commands,
+  Write content, JSON payloads and long tool output are covered; error output
+  stays open and short snippets remain visible.
+
 ## [0.6.13] - 2026-11-27
 
 ### Fixed

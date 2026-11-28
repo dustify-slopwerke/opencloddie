@@ -1,3 +1,5 @@
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -10,6 +12,35 @@ import uuid
 from tests.harness import ROOT, FakeUpstream, TestServer, tmux_has, wait_for
 
 CLI = str(ROOT / "bin" / "opencloddie")
+CLIENT_SCRIPT = str(ROOT / "opencloddie" / "client" / "opencloddie")
+
+
+def load_client_module():
+    """Import the extensionless client script for direct unit testing."""
+    loader = importlib.machinery.SourceFileLoader("opencloddie_client_script", CLIENT_SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class PtyCloseTest(unittest.TestCase):
+    def test_close_is_idempotent_and_spares_reused_fd(self):
+        # The agent closes a Pty from its reader thread, close frames, and
+        # Agent.stop(); a second os.close() of the master fd can hit a number
+        # that another thread just reused (the tmux_kill subprocess pipe).
+        client = load_client_module()
+        pty = client.spawn_pty(["sleep", "5"], 80, 24)
+        fd = pty.master
+        pty.close()
+        self.assertEqual(pty.master, -1)
+        probe = os.open(os.devnull, os.O_RDONLY)
+        try:
+            self.assertEqual(probe, fd, "expected the closed pty fd number to be reused")
+            pty.close()
+            os.fstat(probe)  # raises OSError if the second close hit this fd
+        finally:
+            os.close(probe)
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux is required for the client integration test")

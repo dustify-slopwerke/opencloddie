@@ -405,6 +405,48 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Collapsible code/output: the transcript shows a one-line header and code
+ * stays folded until the reader opens it. */
+.chat-code-collapse {
+  margin: .6em 0;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.chat-tool-body .chat-code-collapse { margin: 6px 0 0; }
+.chat-code-collapse > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  color: var(--dim);
+  font: 11px var(--mono);
+  list-style: none;
+  user-select: none;
+}
+.chat-code-collapse > summary::-webkit-details-marker { display: none; }
+.chat-code-collapse > summary::before {
+  content: '▸';
+  flex: none;
+  color: var(--muted);
+  transition: transform .12s ease;
+}
+.chat-code-collapse[open] > summary::before { transform: rotate(90deg); }
+.chat-code-collapse > summary:hover { color: var(--text); background: rgba(255, 255, 255, .03); }
+.chat-code-label { color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.chat-code-meta { margin-left: auto; color: var(--dim); font-size: 10.5px; }
+.chat-code-collapse > pre {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+  border-radius: 0;
+  max-height: 420px;
+}
+.chat-code-collapse.is-error { border-color: rgba(255, 123, 114, .35); }
+.chat-code-collapse.is-error > summary { color: var(--chat-del-fg); }
 .chat-scroll { max-height: 320px; }
 .chat-tool-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 380px; }
 .chat-tool-output.is-error { border-color: rgba(255, 123, 114, .35); color: var(--chat-del-fg); }

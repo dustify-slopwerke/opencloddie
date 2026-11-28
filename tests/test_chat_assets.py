@@ -41,6 +41,17 @@ class ChatAssetsTest(unittest.TestCase):
             elif path.endswith(".css"):
                 self.assertIn("css", headers.get("content-type", ""), path)
 
+    def test_code_blocks_are_collapsible(self) -> None:
+        status, _, body = self.asset("/chat-render.js")
+        self.assertEqual(status, 200)
+        # Fenced Markdown blocks and long tool input/output are wrapped in a
+        # closed <details> instead of filling the transcript.
+        self.assertIn(b"chat-code-collapse", body)
+        self.assertIn(b"collapseMarkdownCode", body)
+        status, _, body = self.asset("/chat.css")
+        self.assertEqual(status, 200)
+        self.assertIn(b".chat-code-collapse", body)
+
     def test_index_wires_chat_assets_and_pane(self) -> None:
         status, headers, body = self.server.web_request("GET", "/")
         self.assertEqual(status, 200)

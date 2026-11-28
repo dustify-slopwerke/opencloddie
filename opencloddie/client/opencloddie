@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.13"
+VERSION = "0.6.14"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -325,18 +325,31 @@ def tmux_has(name: str) -> bool:
     ).returncode == 0
 
 
-def tmux_kill(name: str) -> bool:
+def tmux_kill(name: str, attempts: int = 2) -> bool:
+    """Kill the session and confirm it is gone.
+
+    `tmux kill-session` is usually synchronous, but a busy server can leave
+    the session visible for a moment.  Retry once and verify instead of
+    trusting the exit code, otherwise the agent can exit while the tmux
+    session keeps running (the E2E kill test caught this on loaded runners).
+    """
     if not name:
         return False
-    try:
-        return subprocess.run(
-            ["tmux", "kill-session", "-t", f"={name}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        ).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    for attempt in range(max(1, attempts)):
+        try:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", f"={name}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if not tmux_has(name):
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.2)
+    return not tmux_has(name)
 
 
 def tmux_enable_mouse(name: str) -> bool:
@@ -1920,16 +1933,24 @@ class Pty:
         self._pending = bytearray()
         self._pending_lock = threading.Lock()
         self._flusher: threading.Thread | None = None
+        # Serializes use of `master` against close(), which invalidates it.
+        # Without this, a writer thread can write to an fd number that was
+        # closed and reused by an unrelated file descriptor.
+        self._fd_lock = threading.Lock()
 
     def resize(self, cols: int, rows: int) -> None:
-        try:
-            fcntl.ioctl(
-                self.master,
-                termios.TIOCSWINSZ,
-                struct.pack("HHHH", max(2, min(int(rows), 1000)), max(2, min(int(cols), 1000)), 0, 0),
-            )
-        except OSError:
-            pass
+        with self._fd_lock:
+            fd = self.master
+            if fd < 0:
+                return
+            try:
+                fcntl.ioctl(
+                    fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", max(2, min(int(rows), 1000)), max(2, min(int(cols), 1000)), 0, 0),
+                )
+            except OSError:
+                pass
 
     def write(self, data: bytes) -> None:
         """Queue input for the pane without blocking the WebSocket reader.
@@ -1964,23 +1985,31 @@ class Pty:
                     self._flusher = None
                     return
                 chunk = bytes(self._pending)
-            try:
-                written = os.write(self.master, chunk)
-            except (BlockingIOError, InterruptedError):
-                try:
-                    select.select([], [self.master], [], 0.2)
-                except (OSError, ValueError):
-                    with self._pending_lock:
-                        self._pending.clear()
-                        self._flusher = None
-                    return
-                continue
-            except OSError:
-                with self._pending_lock:
-                    self._pending.clear()
-                    self._flusher = None
-                return
-            if written <= 0:
+            with self._fd_lock:
+                fd = self.master
+                if fd < 0:
+                    outcome = "closed"
+                else:
+                    try:
+                        written = os.write(fd, chunk)
+                        outcome = "wrote"
+                    except (BlockingIOError, InterruptedError):
+                        outcome = "blocked"
+                    except OSError:
+                        outcome = "error"
+            if outcome == "blocked":
+                # Wait for writability while still holding the fd lock, so
+                # close() cannot invalidate the fd underneath select().
+                with self._fd_lock:
+                    fd = self.master
+                    if fd >= 0:
+                        try:
+                            select.select([], [fd], [], 0.2)
+                            continue
+                        except (OSError, ValueError):
+                            pass
+                outcome = "error"
+            if outcome != "wrote" or written <= 0:
                 with self._pending_lock:
                     self._pending.clear()
                     self._flusher = None
@@ -1989,7 +2018,14 @@ class Pty:
                 del self._pending[:written]
 
     def close(self) -> None:
+        # Called from the channel reader, close frames, Agent.stop() and the
+        # session finally; make it idempotent.  Closing `master` twice is
+        # dangerous: the fd number can already have been reused by an
+        # unrelated thread (for example a subprocess pipe in tmux_kill),
+        # which then fails with EBADF.
         with self._pending_lock:
+            if self.closed:
+                return
             self.closed = True
             self._pending.clear()
         try:
@@ -2000,10 +2036,14 @@ class Pty:
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
         finally:
-            try:
-                os.close(self.master)
-            except OSError:
-                pass
+            with self._fd_lock:
+                fd = self.master
+                self.master = -1
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def spawn_pty(argv: list[str], cols: int, rows: int) -> Pty:
@@ -2372,7 +2412,8 @@ class Agent:
                     self._close_channel(int(message.get("ch", -1)))
                 elif kind == "kill":
                     self.log("server requested kill; stopping session")
-                    tmux_kill(self.tmux)
+                    if not tmux_kill(self.tmux):
+                        self.log(f"tmux session {self.tmux} is still alive after kill")
                     self.stop()
                     return
                 elif kind == "pong":

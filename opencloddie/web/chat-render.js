@@ -55,6 +55,39 @@
     }
   }
 
+  function codeLineCount(text) {
+    const value = String(text == null ? '' : text).replace(/\n$/, '');
+    return value === '' ? 0 : value.split('\n').length;
+  }
+
+  // Long code and tool output dominate the transcript.  Wrap it in a closed
+  // <details> so the reader sees a one-line "language · N lines" header and
+  // can open it when wanted.  `minLines`/`minChars` keep trivial snippets
+  // visible; error output stays open so failures are not hidden behind a click.
+  function collapsibleCode(pre, options = {}) {
+    if (!pre || pre.closest('.chat-code-collapse')) return pre;
+    const text = String(pre.textContent || '');
+    const lines = codeLineCount(text);
+    const shortByLines = !options.minLines || lines < options.minLines;
+    const shortByChars = !options.minChars || text.length < options.minChars;
+    if (shortByLines && shortByChars) return pre;
+    const summary = h('summary', { class: 'chat-code-head' },
+      h('span', { class: 'chat-code-label', text: options.label || 'Code' }),
+      h('span', { class: 'chat-code-meta', text: `${lines} line${lines === 1 ? '' : 's'}` }));
+    return h('details', {
+      class: `chat-code-collapse${options.error ? ' is-error' : ''}`,
+      open: options.open ? true : undefined,
+    }, summary, pre);
+  }
+
+  function collapseMarkdownCode(root) {
+    for (const pre of Array.from(root.querySelectorAll('pre'))) {
+      const code = pre.querySelector('code');
+      const match = code && String(code.className || '').match(/(?:language|lang)-([\w+#.-]+)/);
+      pre.replaceWith(collapsibleCode(pre, { label: match ? match[1] : 'Code' }));
+    }
+  }
+
   function fmtTokens(value) {
     const n = Number(value || 0);
     if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
@@ -289,10 +322,12 @@
           ALLOW_DATA_ATTR: false,
         });
         hardenLinks(wrap);
+        collapseMarkdownCode(wrap);
         return wrap;
       }
     }
     wrap.append(fallbackMarkdown(source));
+    collapseMarkdownCode(wrap);
     return wrap;
   }
 
@@ -474,7 +509,9 @@
   function jsonBlock(value) {
     let text;
     try { text = JSON.stringify(value, null, 2); } catch (_) { text = String(value); }
-    return h('pre', { class: 'chat-code chat-json', text: text == null ? 'null' : text });
+    return collapsibleCode(
+      h('pre', { class: 'chat-code chat-json', text: text == null ? 'null' : text }),
+      { label: 'JSON', minLines: 2, minChars: 120 });
   }
 
   function pathLine(path, extra) {
@@ -521,7 +558,11 @@
     switch (name) {
       case 'Bash':
         if (data.description) nodes.push(h('div', { class: 'chat-tool-desc', text: String(data.description) }));
-        if (data.command) nodes.push(h('pre', { class: 'chat-code', text: String(data.command) }));
+        if (data.command) {
+          nodes.push(collapsibleCode(
+            h('pre', { class: 'chat-code', text: String(data.command) }),
+            { label: 'Command', minLines: 2, minChars: 80 }));
+        }
         break;
       case 'Read': {
         let range = '';
@@ -544,7 +585,11 @@
         break;
       case 'Write':
         nodes.push(pathLine(data.file_path || data.path));
-        if (typeof data.content === 'string') nodes.push(h('pre', { class: 'chat-code chat-scroll', text: data.content }));
+        if (typeof data.content === 'string') {
+          nodes.push(collapsibleCode(
+            h('pre', { class: 'chat-code chat-scroll', text: data.content }),
+            { label: 'Content', minLines: 3, minChars: 200 }));
+        }
         break;
       case 'Glob':
         nodes.push(h('div', { class: 'chat-tool-line' },
@@ -602,7 +647,14 @@
   }
 
   function preOutput(text, isError) {
-    return h('pre', { class: `chat-code chat-tool-output${isError ? ' is-error' : ''}`, text: String(text) });
+    const pre = h('pre', { class: `chat-code chat-tool-output${isError ? ' is-error' : ''}`, text: String(text) });
+    return collapsibleCode(pre, {
+      label: isError ? 'Error output' : 'Output',
+      minLines: 3,
+      minChars: 200,
+      open: Boolean(isError),
+      error: Boolean(isError),
+    });
   }
 
   function truncationNotice(payload) {
@@ -1029,7 +1081,7 @@
   }
 
   /* ---------------------------------------------------------------- rows */
-  function resultRow(payload) {
+  function resultRow(payload, options = {}) {
     const data = payload && typeof payload === 'object' ? payload : {};
     const isError = Boolean(data.is_error);
     const body = h('div', { class: 'chat-row-body' });
@@ -1039,7 +1091,10 @@
       text: isError ? 'Turn failed' : subtype && subtype !== 'success' ? subtype : 'Turn complete',
     }));
     const text = typeof data.result === 'string' ? data.result : (data.result != null ? contentText(data.result) : '');
-    if (text) body.append(md(text));
+    // The result text is normally the final assistant message, which is
+    // already in the transcript; repeating it inside the summary turns every
+    // answer into two copies.
+    if (text && !options.omitText) body.append(md(text));
     const meta = [];
     const cost = Number(data.total_cost_usd);
     if (cost) meta.push(fmtCost(cost));

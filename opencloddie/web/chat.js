@@ -69,6 +69,7 @@
     checkpoints: new Map(),
     lastUser: null,
     seqEls: new Map(),
+    lastAssistantText: '',
     rewind: { busy: false, pending: false, timer: null, refreshTimer: null },
   };
 
@@ -460,6 +461,7 @@
     state.checkpoints = new Map();
     state.seqEls = new Map();
     state.lastUser = null;
+    state.lastAssistantText = '';
     state.lastSeq = 0;
     state.oldestSeq = 0;
     state.hasOlder = false;
@@ -504,6 +506,7 @@
       checkpoints: state.checkpoints,
       seqEls: state.seqEls,
       lastUser: state.lastUser,
+      lastAssistantText: state.lastAssistantText,
       lastSeq: state.lastSeq,
       oldestSeq: state.oldestSeq,
       hasOlder: state.hasOlder,
@@ -542,6 +545,7 @@
     state.checkpoints = entry.checkpoints;
     state.seqEls = entry.seqEls;
     state.lastUser = entry.lastUser;
+    state.lastAssistantText = entry.lastAssistantText || '';
     state.lastSeq = entry.lastSeq;
     state.oldestSeq = entry.oldestSeq;
     state.hasOlder = entry.hasOlder;
@@ -607,6 +611,7 @@
     state.optimistic = [];
     state.checkpoints.clear();
     state.lastUser = null;
+    state.lastAssistantText = '';
     state.seqEls.clear();
     state.streaming = false;
     state.pinned = true;
@@ -1195,6 +1200,59 @@
       appendTimeline(el);
     }
     state.lastUser = { el, uuid: payload.uuid ? String(payload.uuid) : '' };
+    state.lastAssistantText = '';
+  }
+
+  // A final block can be delivered more than once (an old runner replaying the
+  // same assistant event, or a reconnect replaying from an earlier seq).  Only
+  // the first copy is rendered; otherwise the same paragraph is appended
+  // beside the one the stream already produced.
+  function claimFinalBlock(group, blockIndex, type, text) {
+    if (!group.renderedBlocks) group.renderedBlocks = new Set();
+    const fingerprint = `${blockIndex}|${type}|${text}`;
+    if (group.renderedBlocks.has(fingerprint)) return false;
+    group.renderedBlocks.add(fingerprint);
+    return true;
+  }
+
+  // The final block can also arrive when its stream element was not consumed
+  // (for example the runner reported a different index for the stream than for
+  // the final block).  If the group already shows the same text, keep the
+  // existing element instead of appending a second copy.
+  function groupHasBlockText(group, selector, text) {
+    const wanted = String(text || '').trim();
+    if (!wanted) return false;
+    for (const node of group.body.querySelectorAll(selector)) {
+      if ((node.textContent || '').trim() === wanted) return true;
+    }
+    return false;
+  }
+
+  // A block that renders nothing (empty text/thinking, or a tool_use whose card
+  // already exists) must not leave an empty article or orphan subagent shell in
+  // the timeline.  On a phone the avatar is hidden, so that residue shows up as
+  // a thin rounded strip with no content.
+  function pruneGroup(group) {
+    if (!group || !group.body || group.body.childNodes.length) return;
+    const el = group.el;
+    const parent = el ? el.parentNode : null;
+    if (el && parent) el.remove();
+    for (const [key, value] of Array.from(state.groups)) {
+      if (value === group) state.groups.delete(key);
+    }
+    if (parent && parent.classList && parent.classList.contains('chat-nested')
+        && parent.childNodes.length === 0) {
+      if (parent.classList.contains('chat-nested-orphan')) {
+        parent.remove();
+        for (const [id, container] of Array.from(state.nestedContainers)) {
+          if (container === parent) state.nestedContainers.delete(id);
+        }
+      } else {
+        // A tool card's nested container that lost its only (empty) group
+        // would otherwise leave a padded, bordered strip inside the card.
+        parent.hidden = true;
+      }
+    }
   }
 
   function handleAssistantBlock(payload) {
@@ -1206,40 +1264,49 @@
     if (!group) return;
     group.finalBlocks.add(blockIndex);
     const type = block.type;
-    if (type === 'text') {
-      const text = block.text || '';
-      const streamed = takeStream(group.key, blockIndex, 'text');
-      const rendered = text ? window.ChatRender.textBlock(String(text)) : null;
-      if (streamed) {
-        if (rendered) streamed.el.replaceWith(rendered);
-        else streamed.el.remove();
-      } else if (rendered) {
-        group.body.append(rendered);
+    try {
+      if (type === 'text') {
+        const text = block.text || '';
+        if (!claimFinalBlock(group, blockIndex, type, text)) return;
+        const streamed = takeStream(group.key, blockIndex, 'text');
+        const rendered = String(text).trim() ? window.ChatRender.textBlock(String(text)) : null;
+        if (streamed) {
+          if (rendered) streamed.el.replaceWith(rendered);
+          else streamed.el.remove();
+        } else if (rendered && !groupHasBlockText(group, ':scope > .chat-text', text)) {
+          group.body.append(rendered);
+        }
+        // Paging in older history must not replace the current turn's text, or
+        // its "Turn complete" row would repeat an answer already on screen.
+        if (text && !parent && !state.replaying) state.lastAssistantText = String(text);
+        return;
       }
-      return;
-    }
-    if (type === 'thinking' || type === 'redacted_thinking') {
-      const text = block.thinking || block.text || (type === 'redacted_thinking' ? '[redacted thinking]' : '');
-      const streamed = takeStream(group.key, blockIndex, 'thinking');
-      const rendered = text ? window.ChatRender.thinkingBlock(String(text)) : null;
-      if (streamed) {
-        if (rendered) streamed.el.replaceWith(rendered);
-        else streamed.el.remove();
-      } else if (rendered) {
-        group.body.append(rendered);
+      if (type === 'thinking' || type === 'redacted_thinking') {
+        const text = block.thinking || block.text || (type === 'redacted_thinking' ? '[redacted thinking]' : '');
+        if (!claimFinalBlock(group, blockIndex, type, text)) return;
+        const streamed = takeStream(group.key, blockIndex, 'thinking');
+        const rendered = String(text).trim() ? window.ChatRender.thinkingBlock(String(text)) : null;
+        if (streamed) {
+          if (rendered) streamed.el.replaceWith(rendered);
+          else streamed.el.remove();
+        } else if (rendered && !groupHasBlockText(group, ':scope > .chat-thinking .chat-thinking-text', text)) {
+          group.body.append(rendered);
+        }
+        return;
       }
-      return;
-    }
-    if (type === 'image') {
-      group.body.append(window.ChatRender.imageBlock(block));
-      return;
-    }
-    if (type === 'tool_use' || type === 'server_tool_use') {
-      handleToolUse(block, group);
-      return;
-    }
-    if (type) {
-      group.body.append(window.ChatRender.statusRow(`Unsupported block: ${String(type)}`, { kind: 'status' }));
+      if (type === 'image') {
+        group.body.append(window.ChatRender.imageBlock(block));
+        return;
+      }
+      if (type === 'tool_use' || type === 'server_tool_use') {
+        handleToolUse(block, group);
+        return;
+      }
+      if (type) {
+        group.body.append(window.ChatRender.statusRow(`Unsupported block: ${String(type)}`, { kind: 'status' }));
+      }
+    } finally {
+      pruneGroup(group);
     }
   }
 
@@ -1283,12 +1350,23 @@
     }
   }
 
+  // The CLI's result payload repeats the final assistant message.  When the
+  // transcript already shows exactly that text, the "Turn complete" row only
+  // needs its title and cost/token metadata.
+  function resultRepeatsAssistant(payload) {
+    const text = typeof payload.result === 'string' ? payload.result.trim() : '';
+    const last = String(state.lastAssistantText || '').trim();
+    return Boolean(text && last && text === last);
+  }
+
   function handleResult(payload, historical) {
     if (historical) {
       // Replayed history must not reset the live turn's status, cost or
       // running tools; only the row itself belongs in the transcript.
       if (payload.local_command !== 'clear') {
-        appendTimeline(window.ChatRender.resultRow(payload));
+        appendTimeline(window.ChatRender.resultRow(payload, {
+          omitText: !state.replaying && resultRepeatsAssistant(payload),
+        }));
       }
       return;
     }
@@ -1303,7 +1381,9 @@
     }
     // /clear starts a new conversation; a "Turn complete" row would be noise.
     if (payload.local_command !== 'clear') {
-      appendTimeline(window.ChatRender.resultRow(payload));
+      appendTimeline(window.ChatRender.resultRow(payload, {
+        omitText: resultRepeatsAssistant(payload),
+      }));
     }
     renderHeader();
     syncComposer();
