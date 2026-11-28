@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "0.6.14"
+VERSION = "0.6.15"
 APP = "opencloddie"
 USER_AGENT = f"{APP}-cli/{VERSION}"
 DEFAULT_TIMEOUT = 30
@@ -458,6 +458,12 @@ def claude_transcript_exists(cwd: str, session_id: str) -> bool:
 
 
 CHAT_MIN_CLAUDE_VERSION = "2.1.300"
+# Address-space cap for a managed session, in MiB.  It is applied with
+# `ulimit -v` in the pane runner, so Claude and every tool it spawns inherit
+# it; a runaway child raises MemoryError instead of exhausting the host.
+# 0 disables the cap.  Override with `memory_limit_mb` in the client config or
+# OPENCLODDIE_MEMORY_LIMIT_MB.
+DEFAULT_SESSION_MEMORY_LIMIT_MB = 16384
 CHAT_DEFAULT_MAX_EVENT_BYTES = 256 * 1024
 CHAT_DEFAULT_MAX_TOOL_RESULT_BYTES = 64 * 1024
 CHAT_DEFAULT_PERMISSION_TIMEOUT = 3600
@@ -803,6 +809,32 @@ def filter_chat_args(args: list[str]) -> list[str]:
     return out
 
 
+def session_memory_limit_mb(cfg: dict) -> int:
+    """Per-session address-space cap in MiB (0 = unlimited).
+
+    OPENCLODDIE_MEMORY_LIMIT_MB wins over the client config's
+    `memory_limit_mb`; an absent or invalid value uses the default cap.
+    """
+    raw = os.environ.get("OPENCLODDIE_MEMORY_LIMIT_MB")
+    if raw is None or str(raw).strip() == "":
+        raw = cfg.get("memory_limit_mb")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_SESSION_MEMORY_LIMIT_MB
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_SESSION_MEMORY_LIMIT_MB
+    return max(0, value)
+
+
+def session_memory_limit_line(cfg: dict) -> str:
+    """The `ulimit -v` line for the pane runner, or "" when unlimited."""
+    limit_mb = session_memory_limit_mb(cfg)
+    if not limit_mb:
+        return ""
+    return f"ulimit -v {limit_mb * 1024} 2>/dev/null || true"
+
+
 def write_runner(
     item: dict, cfg: dict, me: dict, claude_args: list[str], *, mode: str = "tui"
 ) -> str:
@@ -856,6 +888,7 @@ def write_runner(
         "max_event_bytes": max_event_bytes,
         "max_tool_result_bytes": max_tool_result_bytes,
         "permission_timeout_seconds": permission_timeout,
+        "memory_limit_mb": session_memory_limit_mb(cfg),
         "claude_version": claude_version(claude_bin) if mode == "chat" else "",
     }
     write_json(paths["launch"], launch, mode=0o600)
@@ -894,10 +927,13 @@ def write_runner(
 
     lines = [
         "#!/usr/bin/env bash",
-        "# opencloddie-runner-v2",
+        "# opencloddie-runner-v3",
         "set -u",
-        f"cd -- {shlex.quote(item['cwd'])}",
     ]
+    memory_line = session_memory_limit_line(cfg)
+    if memory_line:
+        lines.append(memory_line)
+    lines.append(f"cd -- {shlex.quote(item['cwd'])}")
     for key in (
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
@@ -971,7 +1007,7 @@ def write_runner(
     return path
 
 
-RUNNER_MARKER = "# opencloddie-runner-v2"
+RUNNER_MARKER = "# opencloddie-runner-v3"
 
 
 def runner_is_current(session_id: str) -> bool:

@@ -211,6 +211,39 @@ Set `chat.retention_days`, use the session's delete-history action, or set
 `chat.persist=false` for live-only streaming.  The history is plaintext in the
 same SQLite database as the mailbox.
 
+## Host memory / runaway sessions
+
+**A tool or subagent script exhausted host memory and the whole session died**
+The kernel OOM killer acts on a cgroup, not only on the offending process.
+Sessions launched through an agent's Bash tool can live in a transient
+`tmux-spawn-*.scope`; if that scope has no `OOMPolicy`, systemd's default
+`stop` tears down the whole unit (tmux, agent, chat runner, Claude) when one
+child is OOM-killed.
+
+Mitigations, in order:
+
+1. opencloddie caps each session's address space: `memory_limit_mb` defaults to
+   16384 MiB and can be set in `~/.config/opencloddie/config.json` or with
+   `OPENCLODDIE_MEMORY_LIMIT_MB` (`0` disables).  The cap is applied with
+   `ulimit -v` in the pane runner, so Claude and its tools fail with
+   `MemoryError` instead of taking down the host.  See `docs/CLIENT.md`.
+2. Give the host scope an explicit policy, for example
+   `systemd-run --user --scope -p OOMPolicy=continue -p MemoryMax=24G ...`, or
+   set `DefaultOOMPolicy=continue` in the systemd manager configuration.
+   `OOMPolicy=continue` leaves the rest of the session running after a kill; a
+   `MemoryMax` makes the kernel reclaim the worst offender before swap runs
+   out.
+3. When a tool times out, make sure its whole process group is gone.  Some
+   agent tools move a timed-out command to the background, where it keeps
+   allocating.
+4. Analysis scripts should use visited sets on graph walks and can apply their
+   own `ulimit -v`.
+
+**`MemoryError` or "cannot allocate memory" inside a session**
+The session hit its memory cap.  Raise `memory_limit_mb` (or set it to `0`) and
+restart the session.  Check the launch file for the active value; the cap is
+not the server's `chat.max_event_bytes` or retention settings.
+
 ## Docker / nginx
 
 **502 from nginx**

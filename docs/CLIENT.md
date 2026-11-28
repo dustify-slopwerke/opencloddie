@@ -296,6 +296,7 @@ Environment overrides:
 | `OPENCLODDIE_CONFIG` | path to config.json; local session bookkeeping goes in the same directory |
 | `OPENCLODDIE_SERVER` | server URL override |
 | `OPENCLODDIE_API_KEY` | API key override |
+| `OPENCLODDIE_MEMORY_LIMIT_MB` | per-session address-space cap in MiB; overrides `memory_limit_mb` |
 
 ## The agent
 
@@ -314,6 +315,38 @@ an internal command but useful to understand:
 The agent never receives the OpenCode key; it only carries the opencloddie API
 key.  It is safe to kill: the tmux session survives, and the next
 `opencloddie run` or `attach` starts a new agent.
+
+## Session memory cap
+
+The generated pane runner starts with `ulimit -v`, capping the address space
+available to Claude and every process it spawns (tools, builds, analysis
+scripts).  A runaway child then fails with `MemoryError` / "cannot allocate
+memory" instead of exhausting the host and triggering the kernel OOM killer,
+which can otherwise tear down the whole tmux session.
+
+The default cap is **16384 MiB**.  Override it in
+`~/.config/opencloddie/config.json`:
+
+```json
+{ "memory_limit_mb": 32768 }
+```
+
+or per invocation:
+
+```bash
+OPENCLODDIE_MEMORY_LIMIT_MB=32768 opencloddie run
+```
+
+Set `memory_limit_mb` to `0` to disable the cap.  The active value is recorded
+as `memory_limit_mb` in the session's launch file
+(`~/.local/state/opencloddie/chat-launch-<id>.json`).
+
+The cap applies to Claude and its descendants, not to the tmux server or to
+other windows you open by hand.  Existing sessions pick it up when their runner
+is regenerated: the next `opencloddie run` performs a one-time supervisor
+upgrade (the session is recreated once and the Claude conversation resumes).
+`opencloddie exec`, which runs Claude directly in the current terminal, is not
+capped.
 
 ## Multiple sessions
 

@@ -6,6 +6,18 @@ All notable changes to opencloddie are documented here.  The format follows
 
 ## [Unreleased]
 
+## [0.6.15] - 2026-11-28
+
+### Added
+
+- A per-session memory cap (`memory_limit_mb`, default 16384 MiB, `0` disables)
+  is applied with `ulimit -v` in the pane runner, so Claude and every tool it
+  spawns fail with `MemoryError` instead of exhausting the host.  This keeps a
+  runaway child from triggering a kernel OOM that takes down the whole tmux
+  session.  Override with the client config key or
+  `OPENCLODDIE_MEMORY_LIMIT_MB`; existing sessions pick it up on the next
+  `opencloddie run` (one-time supervisor upgrade).
+
 ## [0.6.14] - 2026-11-28
 
 ### Fixed

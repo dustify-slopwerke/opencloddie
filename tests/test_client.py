@@ -24,6 +24,82 @@ def load_client_module():
     return module
 
 
+class SessionMemoryLimitTest(unittest.TestCase):
+    def setUp(self):
+        self.client = load_client_module()
+        self.tmp = tempfile.mkdtemp(prefix="opencloddie-mem-")
+        self._saved = {}
+        overrides = {
+            "HOME": self.tmp,
+            "XDG_CONFIG_HOME": os.path.join(self.tmp, "config"),
+            "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+            "XDG_CACHE_HOME": os.path.join(self.tmp, "cache"),
+            "OPENCLODDIE_CONFIG": os.path.join(
+                self.tmp, "config", "opencloddie", "config.json"
+            ),
+        }
+        for key, value in overrides.items():
+            self._saved[key] = os.environ.get(key)
+            os.environ[key] = value
+        self._saved["OPENCLODDIE_MEMORY_LIMIT_MB"] = os.environ.pop(
+            "OPENCLODDIE_MEMORY_LIMIT_MB", None
+        )
+        for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            os.makedirs(os.environ[key], exist_ok=True)
+        os.makedirs(os.path.dirname(os.environ["OPENCLODDIE_CONFIG"]), exist_ok=True)
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_default_and_overrides(self):
+        default = self.client.DEFAULT_SESSION_MEMORY_LIMIT_MB
+        self.assertEqual(self.client.session_memory_limit_mb({}), default)
+        self.assertEqual(
+            self.client.session_memory_limit_line({}),
+            f"ulimit -v {default * 1024} 2>/dev/null || true",
+        )
+        self.assertEqual(
+            self.client.session_memory_limit_mb({"memory_limit_mb": 4096}), 4096
+        )
+        os.environ["OPENCLODDIE_MEMORY_LIMIT_MB"] = "2048"
+        self.assertEqual(
+            self.client.session_memory_limit_mb({"memory_limit_mb": 4096}), 2048
+        )
+        os.environ.pop("OPENCLODDIE_MEMORY_LIMIT_MB", None)
+        self.assertEqual(self.client.session_memory_limit_mb({"memory_limit_mb": 0}), 0)
+        self.assertEqual(self.client.session_memory_limit_line({"memory_limit_mb": 0}), "")
+        self.assertEqual(
+            self.client.session_memory_limit_mb({"memory_limit_mb": "bogus"}), default
+        )
+
+    def test_runner_script_applies_cap(self):
+        cfg = {
+            "server": "http://127.0.0.1:1",
+            "api_key": "k",
+            "claude_bin": "/bin/true",
+            "memory_limit_mb": 4096,
+        }
+        item = {
+            "id": "s_" + uuid.uuid4().hex[:12],
+            "tmux": "ocd-mem-test",
+            "cwd": self.tmp,
+            "name": "mem",
+            "claude_session_id": str(uuid.uuid4()),
+        }
+        me = {"model": "test-model", "messages_enabled": False}
+        path = self.client.write_runner(item, cfg, me, [], mode="tui")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("opencloddie-runner-v3", text)
+        self.assertIn("ulimit -v 4194304 2>/dev/null || true", text)
+        self.assertLess(text.index("ulimit -v"), text.index("cd --"))
+
+
 class PtyCloseTest(unittest.TestCase):
     def test_close_is_idempotent_and_spares_reused_fd(self):
         # The agent closes a Pty from its reader thread, close frames, and
