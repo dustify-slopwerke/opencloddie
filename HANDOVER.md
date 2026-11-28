@@ -16,17 +16,17 @@ the traps we hit, and the next steps.
   GHCR multi-arch image published; Release, CI and CodeQL green.
 - **Compose**: `~/compose/opencloddie/compose.yml` is pinned to
   `r.dustify.com/opencloddie:0.6.15`.
-- **Local client**: `~/.local/bin/opencloddie` is 0.6.15. The currently running
-  session's runner/agent process was started on an older client; a
-  restart/handover picks up 0.6.15 and the session memory cap.
+- **Local client**: `~/.local/bin/opencloddie` is 0.6.15. The `opencloddie`
+  session was restarted on 0.6.15; its launch file and running agent are
+  0.6.15, so the client fixes and the 16 GiB session memory cap are active.
 - **Session**: `opencloddie` / `s_6d6e5823821dafeb` on host `orangepi5-plus`,
   cwd `/home/user/src/opencloddie`. Current mode is **chat** (the 19:43 TUI
   handoff was reverted by switching back to Chat); chat history is preserved in
   the hub and permission mode is `auto`.
-- **Hub sessions**: `opencloddie` is online. `fa` is **offline** (last event
-  seq 74690 at 2026-11-28T00:53:15Z, agent `a-1eb387759511b3d7` on host `sb`);
-  its history is intact, but the agent on `sb` must be restarted for it to
-  reappear. `admin` and `eve-o-tool` remain absent.
+- **Hub sessions**: `opencloddie`, `admin` and `fa` are online in chat mode
+  (checked 2026-11-28); `eve-o-tool` is absent. `fa` is back after the
+  2026-11-28 OOM/restart and its history is intact. The `opencloddie` session
+  was restarted on 0.6.15 (launch file version 0.6.15, memory cap active).
 
 ## Important: the “handover” mix-up
 
@@ -42,7 +42,7 @@ That switched the session from chat to the terminal at 19:43 UTC. It was then
 switched back to chat. Nothing was lost: the same Claude conversation was
 resumed throughout. The intended meaning was this written handover document.
 Log: `/tmp/oc-handover-tui.log`. This document was included in the 0.6.13
-release commit; this version is the updated copy on `main`.
+release and refreshed for 0.6.14/0.6.15 on `main`.
 
 If you want the web chat back, use the **Chat** toggle in the web UI, or call
 the same endpoint with `{"mode":"chat","force":true}` (headers:
@@ -156,10 +156,10 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 
 ## Known issues / next steps
 
-- **Client version**: the running session's runner/agent predates 0.6.15 even
-  though the installed binary and web UI are 0.6.15. Restart the session (or
-  hand off) to get the client-side fixes and the memory cap. The web UI fixes
-  are already live.
+- **Client versions**: `opencloddie` is on 0.6.15 after the restart (client
+  fixes and memory cap active). `admin` and `fa` are online in chat but their
+  client versions were not checked; restart them if they need the 0.6.15
+  client-side fixes or the memory cap.
 - **Session memory cap**: default 16384 MiB, set `memory_limit_mb` in the
   client config or `OPENCLODDIE_MEMORY_LIMIT_MB`, `0` disables. Existing
   sessions pick it up on the next `opencloddie run` (runner v3 upgrade recreates
@@ -172,10 +172,9 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 - **Kill E2E**: the former flake (`test_terminal_roundtrip_and_kill`, tmux
   surviving the API kill) is fixed in 0.6.14: `Pty.close()` is idempotent and
   `tmux_kill` verifies with a retry. Re-run the loop if it ever flakes again.
-- **Missing/offline sessions**: `admin` and `eve-o-tool` are not registered in
-  the hub. `fa` is registered but **offline** (last event 2026-11-28T00:53:15Z,
-  agent on host `sb`); its history is intact. Restart the agent on `sb` to
-  bring it back.
+- **Missing/offline sessions**: `eve-o-tool` is absent. `admin` and `fa` are
+  back online (2026-11-28); their histories are intact. `fa`'s OOM incident is
+  recorded under 0.6.15 above.
 - **Old internal message rows**: the UI hides internal instructions, but rows
   such as seq 43121 remain in the DB. Clearing chat history (in chat mode) or
   the `/clear` boundary removes them from the visible transcript.
@@ -208,3 +207,6 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 - Full suite: 147 passed, 2 skipped; Release, CI and CodeQL green for
   `v0.6.15`; GitHub Release has client, wheel and sdist; GHCR multi-arch
   image published.
+- Session restart (2026-11-28): `opencloddie` launch file version `0.6.15`,
+  running agent on the 0.6.15 binary, mode chat; `admin` and `fa` online in
+  chat; `eve-o-tool` absent.
