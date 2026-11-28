@@ -7,18 +7,18 @@ the traps we hit, and the next steps.
 ## Current state
 
 - **Production**: https://oc.dustify.com, container `opencloddie-opencloddie-1`,
-  image `r.dustify.com/opencloddie:0.6.14`, healthy
-  (`/healthz` → `{"ok":true,"version":"0.6.14","mode":"web"}`).
+  image `r.dustify.com/opencloddie:0.6.15`, healthy
+  (`/healthz` → `{"ok":true,"version":"0.6.15","mode":"web"}`).
 - **Source**: `/home/user/src/opencloddie`, branch `main`, release commit
-  `7c74298` (`release: opencloddie 0.6.14`), tag `v0.6.14` on both remotes
+  `afb6f1d` (`release: opencloddie 0.6.15`), tag `v0.6.15` on both remotes
   (`origin` Gitea and `github`).
-- **Release**: GitHub Release `v0.6.14` published with client, wheel and sdist;
+- **Release**: GitHub Release `v0.6.15` published with client, wheel and sdist;
   GHCR multi-arch image published; Release, CI and CodeQL green.
 - **Compose**: `~/compose/opencloddie/compose.yml` is pinned to
-  `r.dustify.com/opencloddie:0.6.14`.
-- **Local client**: `~/.local/bin/opencloddie` is 0.6.14. The currently running
+  `r.dustify.com/opencloddie:0.6.15`.
+- **Local client**: `~/.local/bin/opencloddie` is 0.6.15. The currently running
   session's runner/agent process was started on an older client; a
-  restart/handover picks up 0.6.14.
+  restart/handover picks up 0.6.15 and the session memory cap.
 - **Session**: `opencloddie` / `s_6d6e5823821dafeb` on host `orangepi5-plus`,
   cwd `/home/user/src/opencloddie`. Current mode is **chat** (the 19:43 TUI
   handoff was reverted by switching back to Chat); chat history is preserved in
@@ -49,7 +49,7 @@ the same endpoint with `{"mode":"chat","force":true}` (headers:
 `Remote-User: <user>` and `X-OpenCloddie-Client: web`). Do not repeat the
 chat→TUI call unless you actually want the terminal.
 
-## What shipped in 0.6.6 – 0.6.14
+## What shipped in 0.6.6 – 0.6.15
 
 The work in this session was the native web chat UI and its reliability.
 
@@ -99,6 +99,14 @@ The work in this session was the native web chat UI and its reliability.
   removes the thin empty strip left after a result when subagent output's
   parent Agent card is outside the loaded history. Chat code is collapsed by
   default behind an expandable “language · N lines” header.
+- **0.6.15** — Per-session memory cap. The generated pane runner sets
+  `ulimit -v` (default 16384 MiB, `memory_limit_mb` /
+  `OPENCLODDIE_MEMORY_LIMIT_MB`, `0` disables) so Claude and every tool it
+  spawns fail with `MemoryError` instead of exhausting the host. Motivated by
+  the 2026-11-28 `fa` OOM: a subagent Python `walk()` without a visited set
+  grew to ~118 GB and the kernel OOM tore down the whole `tmux-spawn` scope.
+  The runner marker is v3; existing sessions upgrade once on the next
+  `opencloddie run` (the session is recreated and Claude resumes).
 
 ## Key files
 
@@ -148,9 +156,19 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 
 ## Known issues / next steps
 
-- **Client version**: the running session's runner/agent predates 0.6.14 even
-  though the installed binary and web UI are 0.6.14. Restart the session (or
-  hand off) to get the client-side fixes. The web UI fixes are already live.
+- **Client version**: the running session's runner/agent predates 0.6.15 even
+  though the installed binary and web UI are 0.6.15. Restart the session (or
+  hand off) to get the client-side fixes and the memory cap. The web UI fixes
+  are already live.
+- **Session memory cap**: default 16384 MiB, set `memory_limit_mb` in the
+  client config or `OPENCLODDIE_MEMORY_LIMIT_MB`, `0` disables. Existing
+  sessions pick it up on the next `opencloddie run` (runner v3 upgrade recreates
+  the session and resumes Claude). `opencloddie exec` is not capped.
+- **Host OOM hardening not applied**: the 2026-11-28 `fa` OOM was caused by a
+  subagent Python script (no visited set) inside a `tmux-spawn-*.scope` with
+  systemd's default `OOMPolicy=stop`. opencloddie was collateral. Setting
+  `DefaultOOMPolicy=continue`/`MemoryMax` on the host scope was explicitly
+  deferred; see `docs/TROUBLESHOOTING.md` § Host memory / runaway sessions.
 - **Kill E2E**: the former flake (`test_terminal_roundtrip_and_kill`, tmux
   surviving the API kill) is fixed in 0.6.14: `Pty.close()` is idempotent and
   `tmux_kill` verifies with a retry. Re-run the loop if it ever flakes again.
@@ -171,18 +189,22 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 - `/home/user/.claude/projects/-home-user-src-opencloddie/memory/MEMORY.md`
 - `/home/user/.claude/projects/-home-user-src-opencloddie/memory/opencloddie-production.md`
   (deploy history, release tags, current production notes)
-- `CHANGELOG.md` (0.6.0–0.6.14)
+- `CHANGELOG.md` (0.6.0–0.6.15)
 - `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/CLIENT.md`,
   `docs/CHAT-PROTOCOL.md`, `docs/TROUBLESHOOTING.md`, `docs/RELEASE.md`
 
 ## Verification snapshot
 
-- Production `0.6.14` healthy (`/healthz` → `{"ok":true,"version":"0.6.14",
+- Production `0.6.15` healthy (`/healthz` → `{"ok":true,"version":"0.6.15",
   "mode":"web"}`); served `chat.js` contains `pruneGroup` and
-  `resultRepeatsAssistant`, and `chat-render.js` contains
-  `chat-code-collapse`.
+  `resultRepeatsAssistant`, `chat-render.js` contains `chat-code-collapse`, and
+  `/install/opencloddie` serves a 0.6.15 client containing
+  `DEFAULT_SESSION_MEMORY_LIMIT_MB` and `opencloddie-runner-v3`.
 - Kill E2E: `test_terminal_roundtrip_and_kill` passed 60 consecutive local
-  runs after the fix (it used to fail within 2–6).
-- Full suite: 145 passed, 2 skipped; Release, CI and CodeQL green for
-  `v0.6.14`; GitHub Release has client, wheel and sdist; GHCR multi-arch
+  runs after the 0.6.14 fix (it used to fail within 2–6).
+- Memory cap: generated runner is `bash -n` clean and contains
+  `ulimit -v 16777216`; a 3 GB allocation under a 2 GB cap fails with
+  `MemoryError`; Claude Code 2.1.332 runs under the 16 GB default.
+- Full suite: 147 passed, 2 skipped; Release, CI and CodeQL green for
+  `v0.6.15`; GitHub Release has client, wheel and sdist; GHCR multi-arch
   image published.
