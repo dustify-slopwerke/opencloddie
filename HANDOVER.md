@@ -1,4 +1,4 @@
-# opencloddie handover — 2026-11-27
+# opencloddie handover — 2026-11-28
 
 This is the working handover for the `opencloddie` session. Read this before
 clearing context. It records the current deployment, what was built and fixed,
@@ -7,24 +7,26 @@ the traps we hit, and the next steps.
 ## Current state
 
 - **Production**: https://oc.dustify.com, container `opencloddie-opencloddie-1`,
-  image `r.dustify.com/opencloddie:0.6.13`, healthy
-  (`/healthz` → `{"ok":true,"version":"0.6.13","mode":"web"}`).
+  image `r.dustify.com/opencloddie:0.6.14`, healthy
+  (`/healthz` → `{"ok":true,"version":"0.6.14","mode":"web"}`).
 - **Source**: `/home/user/src/opencloddie`, branch `main`, release commit
-  `4f9a4a3` (`release: opencloddie 0.6.13`), tag `v0.6.13` on both remotes
+  `7c74298` (`release: opencloddie 0.6.14`), tag `v0.6.14` on both remotes
   (`origin` Gitea and `github`).
-- **Release**: GitHub Release `v0.6.13` published with client, wheel and sdist;
+- **Release**: GitHub Release `v0.6.14` published with client, wheel and sdist;
   GHCR multi-arch image published; Release, CI and CodeQL green.
 - **Compose**: `~/compose/opencloddie/compose.yml` is pinned to
-  `r.dustify.com/opencloddie:0.6.13`.
-- **Local client**: `~/.local/bin/opencloddie` is 0.6.13. The currently running
-  session's runner/agent process was started on an older client (0.6.7); a
-  restart/handover picks up 0.6.13.
+  `r.dustify.com/opencloddie:0.6.14`.
+- **Local client**: `~/.local/bin/opencloddie` is 0.6.14. The currently running
+  session's runner/agent process was started on an older client; a
+  restart/handover picks up 0.6.14.
 - **Session**: `opencloddie` / `s_6d6e5823821dafeb` on host `orangepi5-plus`,
   cwd `/home/user/src/opencloddie`. Current mode is **chat** (the 19:43 TUI
   handoff was reverted by switching back to Chat); chat history is preserved in
   the hub and permission mode is `auto`.
-- **Hub sessions**: `opencloddie` and `fa` are online (fa reconnected in chat
-  mode at ~19:55 UTC); `admin` and `eve-o-tool` remain absent.
+- **Hub sessions**: `opencloddie` is online. `fa` is **offline** (last event
+  seq 74690 at 2026-11-28T00:53:15Z, agent `a-1eb387759511b3d7` on host `sb`);
+  its history is intact, but the agent on `sb` must be restarted for it to
+  reappear. `admin` and `eve-o-tool` remain absent.
 
 ## Important: the “handover” mix-up
 
@@ -47,7 +49,7 @@ the same endpoint with `{"mode":"chat","force":true}` (headers:
 `Remote-User: <user>` and `X-OpenCloddie-Client: web`). Do not repeat the
 chat→TUI call unless you actually want the terminal.
 
-## What shipped in 0.6.6 – 0.6.13
+## What shipped in 0.6.6 – 0.6.14
 
 The work in this session was the native web chat UI and its reliability.
 
@@ -87,6 +89,16 @@ The work in this session was the native web chat UI and its reliability.
   tracks per-message block indices. Mobile image attachments fixed by
   snapshotting the selected `FileList` before clearing the input (it was
   live and became empty).
+- **0.6.14** — Flaky kill E2E fixed: `Pty.close()` closed the PTY master twice
+  and could close an fd reused by the concurrent `tmux kill-session`
+  subprocess (EBADF), so the agent exited while tmux survived. Close is now
+  idempotent with fd locking, and `tmux_kill` retries and verifies. Duplicate
+  assistant text is suppressed on three paths (repeated final block, visible
+  duplicate stream, and the “Turn complete” row repeating the final message).
+  Empty assistant groups and orphan subagent containers are pruned, which
+  removes the thin empty strip left after a result when subagent output's
+  parent Agent card is outside the loaded history. Chat code is collapsed by
+  default behind an expandable “language · N lines” header.
 
 ## Key files
 
@@ -136,17 +148,16 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 
 ## Known issues / next steps
 
-- **Flaky CI test**: `test_terminal_roundtrip_and_kill` (tmux survives the API
-  kill on loaded runners). Rerun usually passes; a deterministic fix would
-  retry/verify `tmux_kill` and wait for the session to disappear.
-- **Client version**: the running session's runner is 0.6.7 even though the
-  installed binary is 0.6.13. Restart the session (or hand off) to get the
-  0.6.13 client-side internal-message and block-index fixes. The web UI is
-  already 0.6.13, including the UI-side stream/index fallback.
-- **Missing sessions**: `admin` and `eve-o-tool` are not registered in the hub
-  anymore. If they should return, rerun the installer/start those sessions on
-  their hosts. `fa` is back online in chat mode (19:55 UTC); its client version
-  has not been checked.
+- **Client version**: the running session's runner/agent predates 0.6.14 even
+  though the installed binary and web UI are 0.6.14. Restart the session (or
+  hand off) to get the client-side fixes. The web UI fixes are already live.
+- **Kill E2E**: the former flake (`test_terminal_roundtrip_and_kill`, tmux
+  surviving the API kill) is fixed in 0.6.14: `Pty.close()` is idempotent and
+  `tmux_kill` verifies with a retry. Re-run the loop if it ever flakes again.
+- **Missing/offline sessions**: `admin` and `eve-o-tool` are not registered in
+  the hub. `fa` is registered but **offline** (last event 2026-11-28T00:53:15Z,
+  agent on host `sb`); its history is intact. Restart the agent on `sb` to
+  bring it back.
 - **Old internal message rows**: the UI hides internal instructions, but rows
   such as seq 43121 remain in the DB. Clearing chat history (in chat mode) or
   the `/clear` boundary removes them from the visible transcript.
@@ -160,21 +171,18 @@ GitHub Release workflow runs on the tag and publishes GHCR + assets. See
 - `/home/user/.claude/projects/-home-user-src-opencloddie/memory/MEMORY.md`
 - `/home/user/.claude/projects/-home-user-src-opencloddie/memory/opencloddie-production.md`
   (deploy history, release tags, current production notes)
-- `CHANGELOG.md` (0.6.0–0.6.13)
+- `CHANGELOG.md` (0.6.0–0.6.14)
 - `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/CLIENT.md`,
   `docs/CHAT-PROTOCOL.md`, `docs/TROUBLESHOOTING.md`, `docs/RELEASE.md`
 
 ## Verification snapshot
 
-- Production `0.6.13` healthy; served `chat.js` contains the stream/index
-  fallback and FileList snapshot fixes.
-- Production mobile attach test at 390×844: one image added to the tray,
-  thumbnail rendered, send enabled, no toast.
-- Stream simulation: delta index 1 + final block index 0 renders one text
-  block; thinking (0) + text (1) with both finals at 0 renders one each.
-- Header QA at 390×844: right side order is
-  `chat-state, chat-metric, chat-metric, chat-metric, chat-clear,
-  chat-jump-user, chat-jump-bottom`; header/timeline boundary 164/164; no
-  header or page overflow; both jumps work; reload gap 0; zero internal
-  bubbles.
-- Full suite: 143 passed, 2 skipped; all 0.6.13 workflows green.
+- Production `0.6.14` healthy (`/healthz` → `{"ok":true,"version":"0.6.14",
+  "mode":"web"}`); served `chat.js` contains `pruneGroup` and
+  `resultRepeatsAssistant`, and `chat-render.js` contains
+  `chat-code-collapse`.
+- Kill E2E: `test_terminal_roundtrip_and_kill` passed 60 consecutive local
+  runs after the fix (it used to fail within 2–6).
+- Full suite: 145 passed, 2 skipped; Release, CI and CodeQL green for
+  `v0.6.14`; GitHub Release has client, wheel and sdist; GHCR multi-arch
+  image published.
